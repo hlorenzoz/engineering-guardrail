@@ -101,6 +101,17 @@ class NoFakeTests(Scenario):
         )
         self.expect(repo.run("staged"), 0)
 
+    def test_a_binary_file_among_the_tests_does_not_break_the_lock(self):
+        # A browser suite keeps its screenshots next to the specs.
+        repo = Repo(self)
+        full = os.path.join(repo.root, "e2e/shot.png")
+        os.makedirs(os.path.dirname(full))
+        with open(full, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n\x00\xff\xfe it.skip(")
+        repo.git("add", "e2e/shot.png")
+        repo.stage("test/a.test.ts", "it.skip('x', () => { expect(f()).toBe(1) })\n")
+        self.expect(repo.run("staged"), 1, "test/a.test.ts:1: focused or skipped test")
+
     def test_ignores_files_that_are_not_tests(self):
         repo = Repo(self)
         repo.stage("src/a.ts", "export const skipIt = 'it.skip('\n")

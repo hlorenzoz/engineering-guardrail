@@ -101,7 +101,11 @@ class Config:
 
 def git(root: str, *args: str, check: bool = True) -> str:
     """Run git and return its output. A failure is an error, never an empty answer."""
-    result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    # Staged content can be binary (a screenshot next to a browser test): undecodable
+    # bytes become a replacement character instead of stopping the lock.
+    result = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
     if check and result.returncode != 0:
         raise GuardrailError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout

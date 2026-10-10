@@ -37,6 +37,7 @@ MUTANTS = [
     ("guardrail/core.py", "if matches(path, self[\"ignore\"]) or self.is_test(path):\n            return False", "if matches(path, self[\"ignore\"]):\n            return False", "tests count as production"),
     ("guardrail/locks.py", "    return _NO_RUNNER\n", "    return None\n", "a test with no runner is skipped in silence"),
     ("guardrail/locks.py", "notes.append(f\"{path}: {len(candidates)} assertion(s) not perturbed (declared", "problems.append(f\"{path}: {len(candidates)} assertion(s) not perturbed (declared", "a suite declared not runnable blocks"),
+    ("guardrail/core.py", "encoding=\"utf-8\", errors=\"replace\"", "encoding=\"utf-8\", errors=\"strict\"", "a binary file among the tests stops the lock"),
     ("guardrail/cli.py", "if core.is_merge(root):\n            return 0", "if False:\n            return 0", "merges are blocked by content locks"),
     ("guardrail/cli.py", "return 1 if problems else 0", "return 0", "a blocked lock exits 0"),
     ("guardrail/cli.py", "cannot look, so it does not pass: {error}\", file=sys.stderr)\n        return 2", "cannot look, so it does not pass: {error}\", file=sys.stderr)\n        return 0", "a lock that cannot look passes"),

@@ -28,7 +28,7 @@ block new work.
    default_install_hook_types: [pre-commit, commit-msg, pre-push]
    repos:
      - repo: https://github.com/hlorenzoz/engineering-guardrail
-       rev: v0.1.1
+       rev: v0.1.2
        hooks:
          - id: guardrail-selfcheck
          - id: guardrail-staged
