@@ -1,0 +1,25 @@
+# Hooks this repository offers to a project's .pre-commit-config.yaml.
+# `language: script` runs bin/guardrail with the system python3: nothing to install.
+- id: guardrail-selfcheck
+  name: guardrail is installed and still bites
+  entry: bin/guardrail selfcheck
+  language: script
+  pass_filenames: false
+  always_run: true
+- id: guardrail-staged
+  name: no fake tests, live citations, switched-on registry
+  entry: bin/guardrail staged
+  language: script
+  pass_filenames: false
+  always_run: true
+- id: guardrail-perturb
+  name: new assertions fail when the expected value is wrong
+  entry: bin/guardrail perturb
+  language: script
+  pass_filenames: false
+  always_run: true
+- id: guardrail-commit-gate
+  name: test with the fix, size cap, cross-view, switch-on
+  entry: bin/guardrail commit-gate
+  language: script
+  stages: [commit-msg]
