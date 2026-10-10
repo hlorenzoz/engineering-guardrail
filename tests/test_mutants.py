@@ -56,6 +56,7 @@ class LocksAreGuarded(unittest.TestCase):
                     source = handle.read()
                 if source.count(original) != 1:
                     not_applied.append(f"{label} (found {source.count(original)} times)")
+                    print(f"NOT APPLIED {file}: {label}", file=sys.stderr, flush=True)
                     continue
                 with open(target, "w", encoding="utf-8") as handle:
                     handle.write(source.replace(original, replacement))
@@ -65,7 +66,10 @@ class LocksAreGuarded(unittest.TestCase):
                     env={**os.environ, "GUARDRAIL_HOME": tmp},
                     capture_output=True,
                 )
-                if result.returncode == 0:
+                killed = result.returncode != 0
+                # One line per mutant, so the log of a run says which lock each one broke.
+                print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}", file=sys.stderr, flush=True)
+                if not killed:
                     survivors.append(label)
         self.assertEqual(not_applied, [], "mutants that could not be applied prove nothing")
         self.assertEqual(survivors, [], "the scenarios stayed green with these locks broken")
