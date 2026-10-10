@@ -35,7 +35,7 @@ Operating guide for AI agents working in this repository: the shared git hooks
 | `guardrail/cli.py` | Commands, messages and exit codes |
 | `bin/guardrail` | The entry point the hooks call |
 | `.pre-commit-hooks.yaml` | The hooks offered to projects |
-| `tests/` | Scenarios and mutants |
+| `tests/` | Scenarios and mutants; `log.sh` and the complete output of the last run of each (`tests_<name>.txt`, not versioned) |
 
 ## Releasing
 

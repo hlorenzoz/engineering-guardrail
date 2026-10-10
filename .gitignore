@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# The complete output of the last run of each test command (tests/log.sh).
+# Kept on this machine for debugging; rewritten by every run, so not versioned.
+tests/tests_*.txt
