@@ -28,7 +28,7 @@ block new work.
    default_install_hook_types: [pre-commit, commit-msg, pre-push]
    repos:
      - repo: https://github.com/hlorenzoz/engineering-guardrail
-       rev: v0.1.0
+       rev: v0.1.1
        hooks:
          - id: guardrail-selfcheck
          - id: guardrail-staged
@@ -95,6 +95,8 @@ commit: nothing may fail only because time passed.
   word, recorded in history; the hook cannot verify it.
 - **Cross-view checks that a test under the configured folder is staged.** It does not
   check that the test really compares two views.
+- **A runner with `"command": null`** declares a suite that cannot run at commit time
+  (a browser suite): its assertions are not perturbed, and the hook says so.
 - **Perturbation covers simple literals** in `toBe`, `toEqual`, `toStrictEqual`,
   `toHaveLength`, `toBeCloseTo` and `toHaveBeenCalledTimes`, one per line, up to `max`
   per commit (it says so when it stops). Computed expected values are not perturbed.

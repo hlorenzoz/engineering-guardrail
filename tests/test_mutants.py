@@ -35,6 +35,8 @@ MUTANTS = [
     ("guardrail/core.py", "len(line[len(key) + 1 :].strip()) >= min_reason", "len(line[len(key) + 1 :].strip()) >= 0", "a hatch without a reason opens the lock"),
     ("guardrail/core.py", "\"--diff-filter=ACMR\"", "\"--diff-filter=ACMRD\"", "a deleted test counts as a staged test"),
     ("guardrail/core.py", "if matches(path, self[\"ignore\"]) or self.is_test(path):\n            return False", "if matches(path, self[\"ignore\"]):\n            return False", "tests count as production"),
+    ("guardrail/locks.py", "    return _NO_RUNNER\n", "    return None\n", "a test with no runner is skipped in silence"),
+    ("guardrail/locks.py", "notes.append(f\"{path}: {len(candidates)} assertion(s) not perturbed (declared", "problems.append(f\"{path}: {len(candidates)} assertion(s) not perturbed (declared", "a suite declared not runnable blocks"),
     ("guardrail/cli.py", "if core.is_merge(root):\n            return 0", "if False:\n            return 0", "merges are blocked by content locks"),
     ("guardrail/cli.py", "return 1 if problems else 0", "return 0", "a blocked lock exits 0"),
     ("guardrail/cli.py", "cannot look, so it does not pass: {error}\", file=sys.stderr)\n        return 2", "cannot look, so it does not pass: {error}\", file=sys.stderr)\n        return 0", "a lock that cannot look passes"),

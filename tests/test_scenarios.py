@@ -273,6 +273,11 @@ class Perturb(Scenario):
         repo.stage("test/a.test.py", self.script(True))
         self.expect(repo.run("perturb"), 1, "no runner configured")
 
+    def test_a_suite_declared_not_runnable_is_a_note_not_a_pass_in_silence(self):
+        repo = Repo(self, {**CONFIG, "perturb": {"runners": [{"files": "test/**", "command": None}]}})
+        repo.stage("test/a.test.py", self.script(False))
+        self.expect(repo.run("perturb"), 0, "1 assertion(s) not perturbed (declared not runnable at commit time)")
+
     def test_bites_when_the_test_is_already_red(self):
         repo = Repo(self)
         repo.stage("test/a.test.py", self.script(True).replace("v = 2 + 2", "v = 5"))

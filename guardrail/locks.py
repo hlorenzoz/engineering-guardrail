@@ -276,11 +276,16 @@ def perturbations(text: str, only_lines: set[int] | None = None) -> list[tuple[i
     return found
 
 
-def _runner_for(config: core.Config, path: str) -> str | None:
+_NO_RUNNER = object()
+
+
+def _runner_for(config: core.Config, path: str):
+    """The command for this test file; None when the project declares it not runnable
+    at commit time (a browser suite, say); _NO_RUNNER when nothing covers it."""
     for runner in config["perturb"]["runners"]:
         if core.matches(path, [runner["files"]]):
             return runner["command"]
-    return None
+    return _NO_RUNNER
 
 
 def _run(command: str, path: str, root: str, timeout: int) -> int:
@@ -314,8 +319,11 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
         if not candidates:
             continue
         command = _runner_for(config, path)
-        if command is None:
+        if command is _NO_RUNNER:
             problems.append(f"{path}: no runner configured in .guardrail.json (perturb.runners); not observed")
+            continue
+        if command is None:
+            notes.append(f"{path}: {len(candidates)} assertion(s) not perturbed (declared not runnable at commit time)")
             continue
         target = os.path.join(root, path)
         with open(target, encoding="utf-8") as handle:
