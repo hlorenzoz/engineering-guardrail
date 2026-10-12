@@ -9,11 +9,16 @@ red when a lock is broken.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
 HOME = os.environ.get("GUARDRAIL_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(HOME, "bin", "guardrail")
+# A hook runs with GIT_DIR, GIT_INDEX_FILE and friends set for the repository being
+# committed. A throwaway repository must never see them: its git would read and write
+# the REAL index instead of its own.
+CLEAN_ENV = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 CONFIG = {
     "production": ["src/**"],
     "crossView": [{"name": "billing", "paths": ["src/billing/**"], "tests": ["test/consistency/**"]}],
@@ -36,7 +41,7 @@ class Repo:
         self.git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "chore: start")
 
     def git(self, *args):
-        subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True)
+        subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True, env=CLEAN_ENV)
 
     def write(self, path, text):
         full = os.path.join(self.root, path)
@@ -49,7 +54,7 @@ class Repo:
         self.git("add", path)
 
     def run(self, *args):
-        result = subprocess.run(["python3", BIN, *args], cwd=self.root, capture_output=True, text=True)
+        result = subprocess.run(["python3", BIN, *args], cwd=self.root, capture_output=True, text=True, env=CLEAN_ENV)
         return result.returncode, result.stderr
 
     def gate(self, message):
@@ -300,6 +305,19 @@ class Perturb(Scenario):
         repo.stage("test/a.test.py", body)
         _, out = repo.run("perturb")
         self.assertIn("not perturbed (limit of 2 per commit reached)", out)
+
+
+class HookEnvironment(Scenario):
+    def test_the_scenarios_run_under_the_git_environment_of_a_hook(self):
+        # pre-commit and git export GIT_DIR / GIT_INDEX_FILE to a hook. If the throwaway
+        # repositories inherited them, the suite would act on the repository being committed.
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "GIT_DIR": os.path.join(tmp, "elsewhere", ".git"), "GIT_INDEX_FILE": os.path.join(tmp, "index")}
+            probes = ["tests.test_scenarios.NoFakeTests.test_bites_on_a_skipped_test", "tests.test_scenarios.Perturb.test_stays_quiet_when_the_assertion_really_checks"]
+            result = subprocess.run([sys.executable, "-m", "unittest", "-q", *probes], cwd=here, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(os.path.exists(env["GIT_INDEX_FILE"]), "the suite touched the index of the hook's repository")
 
 
 class Wiring(Scenario):
