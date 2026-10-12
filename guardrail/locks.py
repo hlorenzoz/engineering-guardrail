@@ -7,11 +7,15 @@ cannot look (no runner, unreadable file) reports a problem. It never passes blin
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
+import tempfile
+from typing import NamedTuple
 
 from . import core
 
@@ -251,8 +255,22 @@ _EXPECTED = re.compile(
 )
 
 
+class _Site(NamedTuple):
+    """An expected value that can be replaced: its line, and where the literal sits in it."""
+
+    number: int
+    literal: str
+    line: str
+    start: int
+    end: int
+
+    def with_value(self, value: str) -> str:
+        """The line with the literal replaced by `value`."""
+        return self.line[: self.start] + value + self.line[self.end :]
+
+
 def _sentinel(literal: str) -> str:
-    """A value the code under test cannot produce by accident."""
+    """A value the code under test cannot produce by accident (one assertion at a time)."""
     if literal in ("true", "false"):
         return "false" if literal == "true" else "true"
     if literal[0] in "'\"":
@@ -260,8 +278,8 @@ def _sentinel(literal: str) -> str:
     return "123456" if literal.replace("_", "") == _NUMBER_SENTINEL else _NUMBER_SENTINEL
 
 
-def perturbations(text: str, only_lines: set[int] | None = None) -> list[tuple[int, str, str]]:
-    """Expected values that can be replaced. Returns (line number, literal, mutated line)."""
+def _sites(text: str, only_lines: set[int] | None = None) -> list[_Site]:
+    """Expected values that can be replaced, one per line."""
     found = []
     for number, line in enumerate(text.splitlines(), start=1):
         if only_lines is not None and number not in only_lines:
@@ -270,26 +288,30 @@ def perturbations(text: str, only_lines: set[int] | None = None) -> list[tuple[i
             continue
         match = _EXPECTED.search(line)
         if match:
-            literal = match.group(2)
-            mutated = line[: match.start(2)] + _sentinel(literal) + line[match.end(2) :]
-            found.append((number, literal, mutated))
+            found.append(_Site(number, match.group(2), line, match.start(2), match.end(2)))
     return found
+
+
+def perturbations(text: str, only_lines: set[int] | None = None) -> list[tuple[int, str, str]]:
+    """Expected values that can be replaced. Returns (line number, literal, mutated line)."""
+    return [(site.number, site.literal, site.with_value(_sentinel(site.literal))) for site in _sites(text, only_lines)]
 
 
 _NO_RUNNER = object()
 
 
 def _runner_for(config: core.Config, path: str):
-    """The command for this test file; None when the project declares it not runnable
-    at commit time (a browser suite, say); _NO_RUNNER when nothing covers it."""
+    """The runner entry for this test file; _NO_RUNNER when nothing covers it. Its
+    `command` is None when the project declares the file not runnable at commit time
+    (a browser suite, say)."""
     for runner in config["perturb"]["runners"]:
         if core.matches(path, [runner["files"]]):
-            return runner["command"]
+            return runner
     return _NO_RUNNER
 
 
-def _run(command: str, path: str, root: str, timeout: int) -> int:
-    """Run the project's test command for one file. A timeout counts as a failure."""
+def _execute(command: str, path: str, root: str, timeout: int) -> tuple[int, bool]:
+    """Run the project's test command for one file. Returns (exit code, timed out)."""
     try:
         completed = subprocess.run(
             command.replace("{file}", shlex.quote(path)),
@@ -298,9 +320,142 @@ def _run(command: str, path: str, root: str, timeout: int) -> int:
             capture_output=True,
             timeout=timeout,
         )
-        return completed.returncode
+        return completed.returncode, False
     except subprocess.TimeoutExpired:
-        return 124
+        return 124, True
+
+
+def _run(command: str, path: str, root: str, timeout: int) -> int:
+    """The exit code of the test command. A timeout counts as a failure."""
+    return _execute(command, path, root, timeout)[0]
+
+
+# --- perturbation in batch -------------------------------------------------
+#
+# Running the whole file once per assertion costs a process of the project's test
+# runner each. In batch mode all the assertions of a file are replaced at once, each by
+# a sentinel of its own, and a structured report says which assertions failed WITH
+# their own sentinel in the message. Only that counts as proof: not the exit code, not a
+# line number, not a failed test without the sentinel. Whatever the batch cannot prove
+# goes through the one-by-one check, so the batch never produces a problem and never
+# hides one it cannot see.
+
+_BATCH_FORMATS = ("jest-json",)
+# Sentinels are 988654003, 989654006, ... A matcher such as toBeCloseTo prints the
+# DIFFERENCE between the received and the expected value; with sentinels one apart, a
+# small received value would print another assertion's sentinel. A stride of a million
+# keeps every such difference away from them.
+_BATCH_BASE, _BATCH_STRIDE = 987654000, 1000003
+
+
+def _batch_of(runner: dict):
+    """The runner's `batch` declaration, validated; None when it has none."""
+    batch = runner.get("batch")
+    if batch is None:
+        return None
+    if not isinstance(batch, dict) or batch.get("format") not in _BATCH_FORMATS or not isinstance(batch.get("args"), str):
+        raise core.GuardrailError(
+            "perturb.runners batch must be an object with \"args\" (a string) and \"format\" (one of "
+            + ", ".join(_BATCH_FORMATS) + ")"
+        )
+    if "{report}" not in batch["args"]:
+        raise core.GuardrailError("perturb.runners batch.args must contain {report}, the file the runner writes its report to")
+    return batch
+
+
+def batch_sentinels(sites: list[_Site], text: str) -> list[tuple[str, str]]:
+    """One distinct sentinel per site: (replacement for the literal, token to look for).
+
+    A number for numbers and booleans (a boolean cannot carry an identity; comparing it
+    with a unique number fails for the same reason and the message names the number), a
+    string for strings. A token that already occurs in the file is never used, so
+    nothing but the replacement can put it in a message.
+    """
+    marks, index = [], 0
+    for site in sites:
+        while True:
+            index += 1
+            number = str(_BATCH_BASE + _BATCH_STRIDE * index)
+            text_token = f"ZZ_MUTATED_{index}_ZZ"
+            is_string = site.literal[0] in "'\""
+            token = text_token if is_string else number
+            if token not in text:
+                marks.append((site.literal[0] + token + site.literal[0] if is_string else token, token))
+                break
+    return marks
+
+
+def _failed_messages(report_path: str) -> list[str] | None:
+    """The failure messages of the FAILED tests in a Jest-shaped JSON report
+    (`testResults[].assertionResults[]` with `status` and `failureMessages`), which is
+    also what Vitest's `json` reporter writes. None when the report is missing,
+    unreadable or not of that shape: a report that cannot be read proves nothing."""
+    try:
+        with open(report_path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        messages = []
+        for file_result in document["testResults"]:
+            for test in file_result["assertionResults"]:
+                if not isinstance(test["status"], str) or not isinstance(test["failureMessages"], list):
+                    return None
+                if not all(isinstance(m, str) for m in test["failureMessages"]):
+                    return None
+                if test["status"] == "failed":
+                    messages += test["failureMessages"]
+        return messages
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _mentions(messages: list[str], token: str) -> bool:
+    """Does a failure message name this sentinel? A number must not be part of a longer one."""
+    pattern = re.escape(token) if not token.isdigit() else rf"(?<!\d)(?<!\d\.){token}(?!\d)(?!\.\d)"
+    return any(re.search(pattern, message) for message in messages)
+
+
+def _prove_together(root, runner, batch, path, target, lines, sites, scratch, timeout) -> list[_Site]:
+    """Round after round, replace every assertion not yet proven, each by its own
+    sentinel, and keep those whose sentinel is in the message of a failed test. A proven
+    assertion is restored before the next round, which is what uncovers one that was
+    hidden behind it in the same test (the first failure ends a test). Returns the
+    assertions the batch could not prove, in line order, for the one-by-one check."""
+    marks = batch_sentinels(sites, "\n".join(lines))
+    remaining = list(range(len(sites)))
+    while len(remaining) > 1:  # one left is checked alone: a batch of one gains nothing
+        changed = list(lines)
+        for index in remaining:
+            changed[sites[index].number - 1] = sites[index].with_value(marks[index][0])
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(changed))
+        # The report of an earlier round may still be there if this run writes none. It
+        # cannot prove anything now: every assertion it caught is already out of `remaining`.
+        if not scratch:
+            scratch.append(tempfile.mkdtemp(prefix="guardrail-perturb-"))
+        report = os.path.join(scratch[0], "report.json")
+        command = runner["command"] + " " + batch["args"].replace("{report}", shlex.quote(report))
+        code, timed_out = _execute(command, path, root, timeout)
+        # A run that timed out, or that reported success, cannot have caught anything.
+        messages = None if timed_out or code == 0 else _failed_messages(report)
+        proven = [i for i in remaining if messages and _mentions(messages, marks[i][1])]
+        if not proven:
+            break
+        remaining = [i for i in remaining if i not in proven]
+    return [sites[i] for i in remaining]
+
+
+def _prove_alone(root, command, path, target, lines, site, timeout) -> list[str]:
+    """Replace only this assertion's expected value, run the file once: it must fail."""
+    changed = list(lines)
+    changed[site.number - 1] = site.with_value(_sentinel(site.literal))
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(changed))
+    code = _run(command, path, root, timeout)
+    if code == 0:
+        return [
+            f"{path}:{site.number}: still green with the expected value {site.literal} replaced. "
+            "The assertion does not check what it claims."
+        ]
+    return []
 
 
 def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[str]]:
@@ -315,23 +470,28 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
     for path in core.staged_files(root):
         if not config.is_test(path):
             continue
-        candidates = perturbations(core.staged_text(root, path), core.staged_added_lines(root, path))
-        if not candidates:
+        sites = _sites(core.staged_text(root, path), core.staged_added_lines(root, path))
+        if not sites:
             continue
-        command = _runner_for(config, path)
-        if command is _NO_RUNNER:
+        runner = _runner_for(config, path)
+        if runner is _NO_RUNNER:
             problems.append(f"{path}: no runner configured in .guardrail.json (perturb.runners); not observed")
             continue
+        command = runner["command"]
         if command is None:
-            notes.append(f"{path}: {len(candidates)} assertion(s) not perturbed (declared not runnable at commit time)")
+            notes.append(f"{path}: {len(sites)} assertion(s) not perturbed (declared not runnable at commit time)")
             continue
+        batch = _batch_of(runner)
         target = os.path.join(root, path)
         with open(target, encoding="utf-8") as handle:
             original = handle.read()
+        scratch = []  # the folder the batch reports go in, removed with the file restored
 
         def restore(*_args):
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(original)
+            while scratch:
+                shutil.rmtree(scratch.pop(), ignore_errors=True)
 
         previous = {s: signal.signal(s, lambda *_: (restore(), os._exit(130))) for s in (signal.SIGINT, signal.SIGTERM)}
         try:
@@ -339,21 +499,17 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
                 problems.append(f"{path}: the test fails before any perturbation; fix it first")
                 continue
             lines = original.split("\n")
-            for number, literal, mutated in candidates:
+            chosen = []
+            for site in sites:
                 if budget == 0:
-                    notes.append(f"{path}:{number}: not perturbed (limit of {settings['max']} per commit reached)")
+                    notes.append(f"{path}:{site.number}: not perturbed (limit of {settings['max']} per commit reached)")
                     continue
                 budget -= 1
-                changed = list(lines)
-                changed[number - 1] = mutated
-                with open(target, "w", encoding="utf-8") as handle:
-                    handle.write("\n".join(changed))
-                code = _run(command, path, root, settings["timeoutSeconds"])
-                if code == 0:
-                    problems.append(
-                        f"{path}:{number}: still green with the expected value {literal} replaced. "
-                        "The assertion does not check what it claims."
-                    )
+                chosen.append(site)
+            if batch:
+                chosen = _prove_together(root, runner, batch, path, target, lines, chosen, scratch, settings["timeoutSeconds"])
+            for site in chosen:
+                problems += _prove_alone(root, command, path, target, lines, site, settings["timeoutSeconds"])
         finally:
             restore()
             for signum, handler in previous.items():
