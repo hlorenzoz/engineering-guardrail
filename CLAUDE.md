@@ -20,6 +20,9 @@ Operating guide for AI agents working in this repository: the shared git hooks
   and is killed. A surviving mutant, or one that cannot be applied, fails the suite.
 - **Check the message, not only the exit code.** A lock that blocks for the wrong reason
   is broken.
+- **A batch result is evidence, never a verdict.** In `perturb` batch mode a result can
+  only say "proven", on a sentinel found in a failed test's message. A problem comes from
+  the one-by-one check alone, and a report that cannot be read proves nothing.
 - **A hatch is matched as a whole line prefix and needs a reason.** Never as a substring.
 - **No lock may fail because time passed.** Stale items are notes.
 - **Honest limits are documented.** When a lock trusts a person's word or misses a case,
