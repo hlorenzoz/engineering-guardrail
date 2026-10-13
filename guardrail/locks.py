@@ -10,6 +10,7 @@ import datetime
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -310,8 +311,14 @@ def _runner_for(config: core.Config, path: str):
     return _NO_RUNNER
 
 
-def _execute(command: str, path: str, root: str, timeout: int) -> tuple[int, bool]:
-    """Run the project's test command for one file. Returns (exit code, timed out)."""
+def _execute(command: str, path: str, root: str, timeout: int) -> tuple[int, bool, str]:
+    """Run the project's test command for one file. Returns (exit code, timed out, output).
+
+    The runner never sees the GIT_* variables a hook sets (GIT_DIR, GIT_INDEX_FILE, ...): a
+    project test that runs git in a scratch folder would act on the repository being
+    committed instead (a `git init` or `git config` under a hook wrote into the real one).
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
         completed = subprocess.run(
             command.replace("{file}", shlex.quote(path)),
@@ -319,10 +326,11 @@ def _execute(command: str, path: str, root: str, timeout: int) -> tuple[int, boo
             cwd=root,
             capture_output=True,
             timeout=timeout,
+            env=env,
         )
-        return completed.returncode, False
+        return completed.returncode, False, completed.stdout.decode("utf-8", "replace") + completed.stderr.decode("utf-8", "replace")
     except subprocess.TimeoutExpired:
-        return 124, True
+        return 124, True, ""
 
 
 def _run(command: str, path: str, root: str, timeout: int) -> int:
@@ -358,6 +366,8 @@ def _batch_of(runner: dict):
             "perturb.runners batch must be an object with \"args\" (a string) and \"format\" (one of "
             + ", ".join(_BATCH_FORMATS) + ")"
         )
+    if not isinstance(batch.get("baselineArgs", ""), str):
+        raise core.GuardrailError("perturb.runners batch.baselineArgs must be a string")
     if "{report}" not in batch["args"]:
         raise core.GuardrailError("perturb.runners batch.args must contain {report}, the file the runner writes its report to")
     return batch
@@ -413,6 +423,44 @@ def _mentions(messages: list[str], token: str) -> bool:
     return any(re.search(pattern, message) for message in messages)
 
 
+def _seen_token(nonce: str, index: int) -> str:
+    """What a reached assertion prints. The nonce makes it unique to this run."""
+    return f"ZZ_SEEN_{nonce}_{index}_ZZ"
+
+
+def _seen_expression(nonce: str, index: int, literal: str) -> str:
+    """The literal, wrapped so that evaluating it prints the marker and still yields the literal.
+
+    A comma expression is valid wherever an argument is, adds nothing to the line count and
+    keeps the value. The token is built at run time from three pieces, so the file's own text
+    (echoed in a code frame, say) never contains it: only executing the call prints it.
+    """
+    return f'(console.log("ZZ_SEEN_" + "{nonce}_{index}" + "_ZZ"), {literal})'
+
+
+def _baseline(root, command, extra, path, target, lines, sites, timeout, nonce) -> tuple[int, set[int]]:
+    """The unperturbed run, instrumented to learn which assertions it reaches, at no extra run.
+
+    Returns (exit code of the baseline, indexes of the sites whose marker came back). If the
+    instrumented run fails the plain baseline decides: it fails too, the test is red; it
+    passes, the instrumentation broke it (a test that counts console.log calls) and nothing
+    is seen. Nothing seen is never an error: those assertions are checked one by one.
+    `extra` is the project's `baselineArgs`: some reporters hide the output of passing tests
+    (Vitest's does when an AI agent runs it), and the markers need one that shows it.
+    """
+    changed = list(lines)
+    for index, site in enumerate(sites):
+        changed[site.number - 1] = site.with_value(_seen_expression(nonce, index, site.literal))
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(changed))
+    code, _timed_out, output = _execute((command + " " + extra).strip(), path, root, timeout)
+    if code == 0:
+        return 0, {index for index in range(len(sites)) if _seen_token(nonce, index) in output}
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+    return _run(command, path, root, timeout), set()
+
+
 def _prove_together(root, runner, batch, path, target, lines, sites, scratch, timeout) -> list[_Site]:
     """Round after round, replace every assertion not yet proven, each by its own
     sentinel, and keep those whose sentinel is in the message of a failed test. A proven
@@ -433,7 +481,7 @@ def _prove_together(root, runner, batch, path, target, lines, sites, scratch, ti
             scratch.append(tempfile.mkdtemp(prefix="guardrail-perturb-"))
         report = os.path.join(scratch[0], "report.json")
         command = runner["command"] + " " + batch["args"].replace("{report}", shlex.quote(report))
-        code, timed_out = _execute(command, path, root, timeout)
+        code, timed_out, _output = _execute(command, path, root, timeout)
         # A run that timed out, or that reported success, cannot have caught anything.
         messages = None if timed_out or code == 0 else _failed_messages(report)
         proven = [i for i in remaining if messages and _mentions(messages, marks[i][1])]
@@ -467,6 +515,7 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
     problems, notes = [], []
     settings = config["perturb"]
     budget = settings["max"]
+    nonce = secrets.token_hex(6)
     for path in core.staged_files(root):
         if not config.is_test(path):
             continue
@@ -495,10 +544,15 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
 
         previous = {s: signal.signal(s, lambda *_: (restore(), os._exit(130))) for s in (signal.SIGINT, signal.SIGTERM)}
         try:
-            if _run(command, path, root, settings["timeoutSeconds"]) != 0:
+            lines = original.split("\n")
+            seen = None  # which assertions the baseline reached; only learned for a batch
+            if batch and min(len(sites), budget) > 1:
+                code, seen = _baseline(root, command, batch.get("baselineArgs", ""), path, target, lines, sites[:budget], settings["timeoutSeconds"], nonce)
+            else:
+                code = _run(command, path, root, settings["timeoutSeconds"])
+            if code != 0:
                 problems.append(f"{path}: the test fails before any perturbation; fix it first")
                 continue
-            lines = original.split("\n")
             chosen = []
             for site in sites:
                 if budget == 0:
@@ -506,8 +560,18 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
                     continue
                 budget -= 1
                 chosen.append(site)
-            if batch:
-                chosen = _prove_together(root, runner, batch, path, target, lines, chosen, scratch, settings["timeoutSeconds"])
+            if seen is not None:
+                if not seen:
+                    notes.append(f"{path}: the batch could not tell which assertions run (no marker came back from the runner); each is checked on its own")
+                # Only an assertion the unperturbed run reached may count on the batch: one that
+                # runs only after another failed (a catch block, an afterEach, `if (!flag)`) would
+                # fail here and never fail alone.
+                reached = [site for index, site in enumerate(chosen) if index in seen]
+                unreached = [site for index, site in enumerate(chosen) if index not in seen]
+                chosen = sorted(
+                    _prove_together(root, runner, batch, path, target, lines, reached, scratch, settings["timeoutSeconds"]) + unreached,
+                    key=lambda site: site.number,
+                )
             for site in chosen:
                 problems += _prove_alone(root, command, path, target, lines, site, settings["timeoutSeconds"])
         finally:

@@ -25,7 +25,7 @@ MUTANTS = [
     ("guardrail/locks.py", "if _is_comment(line) or ALLOW_SKIP in line:", "if ALLOW_SKIP in line:", "a skip inside a comment bites"),
     ("guardrail/locks.py", "\"focused or skipped test\"),\n    (re.compile(r\"\\b(?:xit", "\"focused\"),\n    (re.compile(r\"\\b(?:xit", "wrong message for a skipped test"),
     ("guardrail/locks.py", "if code == 0:\n        return [", "if code == 99:\n        return [", "perturbation survivors are not reported"),
-    ("guardrail/locks.py", "if _run(command, path, root, settings[\"timeoutSeconds\"]) != 0:", "if False:", "a red test counts as a killed perturbation"),
+    ("guardrail/locks.py", "            if code != 0:\n                problems.append(", "            if False:\n                problems.append(", "a red test counts as a killed perturbation"),
     ("guardrail/locks.py", "        finally:\n            restore()", "        finally:\n            pass", "the file is left perturbed"),
     ("guardrail/locks.py", "if cited_line < 1 or cited_line > len(lines):", "if cited_line < 1:", "citation past the end is accepted"),
     ("guardrail/locks.py", "elif not lines[cited_line - 1].strip():", "elif False:", "citation of a blank line is accepted"),
@@ -57,6 +57,16 @@ MUTANTS = [
     ("guardrail/locks.py", "if \"{report}\" not in batch[\"args\"]:", "if False:", "a batch declaration without {report} is accepted"),
     ("guardrail/locks.py", "lambda *_: (restore(), os._exit(130))", "lambda *_: os._exit(130)", "an interrupt leaves the file perturbed"),
     ("guardrail/locks.py", "            while scratch:\n", "            while False:\n", "the report folder is left behind"),
+    # --- the unperturbed run must reach an assertion before the batch may count for it ---
+    ("guardrail/locks.py", "return 0, {index for index in range(len(sites)) if _seen_token(nonce, index) in output}", "return 0, set(range(len(sites)))", "every assertion counts as reached"),
+    ("guardrail/locks.py", "if _seen_token(nonce, index) in output}", "if _seen_token(nonce, 0) in output}", "the marker of one assertion is read for another"),
+    ("guardrail/locks.py", "\"ZZ_SEEN_\" + \"{nonce}_{index}\" + \"_ZZ\"", "\"ZZ_SEEN_{nonce}_{index}_ZZ\"", "a marker that is in the file's own text counts as seen"),
+    ("guardrail/locks.py", "return _run(command, path, root, timeout), set()", "return 1, set()", "a baseline broken by the markers is reported as red"),
+    ("guardrail/locks.py", "unreached = [site for index, site in enumerate(chosen) if index not in seen]", "unreached = []", "an assertion that was not reached is never checked"),
+    ("guardrail/locks.py", "reached = [site for index, site in enumerate(chosen) if index in seen]", "reached = list(chosen)", "an assertion that was not reached joins the batch"),
+    ("guardrail/locks.py", "_execute((command + \" \" + extra).strip(), path, root, timeout)", "_execute(command, path, root, timeout)", "the baseline args are not passed to the instrumented run"),
+    ("guardrail/locks.py", "if not isinstance(batch.get(\"baselineArgs\", \"\"), str):", "if False:", "baseline args of the wrong type are accepted"),
+    ("guardrail/locks.py", "if not key.startswith(\"GIT_\")}", "if True}", "the runner sees the git variables of the hook"),
 ]
 
 

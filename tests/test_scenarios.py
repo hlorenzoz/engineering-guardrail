@@ -36,9 +36,20 @@ RUNNER = r"""
 #   soft(A).toBe(B)                  records a failure and goes on
 #   unchecked(A).toBe(B)             an assertion that never compares (the bug the lock hunts)
 #   swallowed(A).toBe(B)             a failure that a try/catch swallows
-#   whenfailed(A).toBe(B)            runs only after a swallowed failure (a catch block)
-# With --report=PATH it also writes a Jest-shaped JSON report; --mode=... breaks it on purpose
-# (echo: a passed test carries the message; exit0: the report claims a failure, the exit code says 0).
+#   guarded(A).toBe(B)               an assertion in a try whose catch block runs and rethrows
+#   whenfailed(A).toBe(B)            the catch block: runs only after a guarded or swallowed failure
+#   afterfailed(A).toBe(B)           an afterEach that checks the result: runs only if the test failed
+#   setflag / unlessflag(A).toBe(B)  a flag a test sets when it gets that far; the second runs only without it
+#   twice(A).toBe(B)                 one line that runs twice: swallowed in the normal flow, and again
+#                                    (surfacing) after the test failed
+# Reaching an assertion prints its marker when the expected value was wrapped by the lock
+# (console.log(...), value), as a real runner prints console.log.
+# With --report=PATH it also writes a Jest-shaped JSON report; --mode=... breaks things on purpose
+# (echo: a passed test carries the message; exit0: the report claims a failure, the exit code says 0;
+# silent: console.log prints nothing; quiet: it prints only when --console is also given (a reporter
+# that hides the output of passing tests, as Vitest's does when an AI agent runs it);
+# nolog: a test that fails if console.log is called;
+# echo-source: the runner prints the source it read, as a code frame would).
 import json, os, re, sys, time
 
 args = sys.argv[1:]
@@ -49,21 +60,32 @@ for arg in args[1:]:
         key, _, value = arg[2:].partition("=")
         opts[key] = value or "1"
 mode = opts.get("mode", "")
-STEP = re.compile(r"^\s*(expect|soft|unchecked|swallowed|whenfailed)\(([^()]*)\)\.(\w+)\(([^()]*)\)\s*$")
+STEP = re.compile(r"^\s*(expect|soft|unchecked|swallowed|guarded|whenfailed|afterfailed|unlessflag|twice)\(([^()]*)\)\.(\w+)\((.*)\)\s*$")
+WRAP = re.compile(r"^\(console\.log\((.*?)\), (.*)\)$")
 
 
 def bare(text):
     return text.strip().strip("'\"")
 
 
+def unwrap(raw):
+    wrapped = WRAP.match(raw.strip())
+    if not wrapped:
+        return raw.strip(), None
+    return wrapped.group(2).strip(), "".join(re.findall(r'"([^"]*)"', wrapped.group(1)))
+
+
 tests = []
-with open(path, encoding="utf-8") as handle:
-    for number, line in enumerate(handle.read().split("\n"), start=1):
-        if line.startswith("test "):
-            tests.append((line[5:], []))
-        elif tests and STEP.match(line):
-            kind, actual, matcher, expected = STEP.match(line).groups()
-            tests[-1][1].append((number, kind, bare(actual), matcher, bare(expected), expected.strip()))
+source = open(path, encoding="utf-8").read()
+for number, line in enumerate(source.split("\n"), start=1):
+    if line.startswith("test "):
+        tests.append((line[5:], []))
+    elif tests and line.strip() == "setflag":
+        tests[-1][1].append((number, "setflag", "", "", "", "", None))
+    elif tests and STEP.match(line):
+        kind, actual, matcher, expected = STEP.match(line).groups()
+        inner, marker = unwrap(expected)
+        tests[-1][1].append((number, kind, bare(actual), matcher, bare(inner), inner, marker))
 
 
 def agrees(matcher, actual, expected):
@@ -83,37 +105,82 @@ def describe(matcher, actual, expected):
     return "expected %s to be %s // Object.is equality" % (actual, expected)
 
 
-perturbed = {}
-results = []
+perturbed, results, marked, logged = {}, [], False, False
+flag = False
 for name, steps in tests:
-    messages, swallowed = [], False
-    for number, kind, actual, matcher, expected, raw in steps:
-        if actual != expected:
+    for number, kind, actual, matcher, expected, raw, marker in steps:
+        if kind != "setflag" and actual != expected:
             perturbed[number] = raw
-    for number, kind, actual, matcher, expected, raw in steps:
+        marked = marked or marker is not None
+    messages, swallowed, guarded, retry, late = [], False, False, [], []
+
+    def reach(step):
+        global logged
+        if step[6] is not None and mode != "silent" and ("quiet" not in opts or "console" in opts):
+            print(step[6])
+            logged = True
+
+    def check(step, swallow=False):
+        number, kind, actual, matcher, expected, raw, marker = step
+        if agrees(matcher, actual, expected):
+            return True
+        if not swallow:
+            messages.append(describe(matcher, actual, expected))
+        return False
+
+    for step in steps:
+        number, kind, actual, matcher, expected, raw, marker = step
+        if kind == "setflag":
+            if not guarded:
+                flag = True
+            continue
+        if guarded and kind != "whenfailed":
+            continue
+        if kind == "whenfailed" and not (swallowed or guarded):
+            continue
+        if kind == "unlessflag" and flag:
+            continue
+        if kind == "afterfailed":
+            late.append(step)
+            continue
+        reach(step)
         if kind == "unchecked":
             if mode == "echo" and actual != expected:
                 results.append(("echoed " + name, "passed", [describe(matcher, actual, expected)]))
             if mode == "exit0" and "report" in opts and actual != expected:  # a runner that lies
                 results.append(("claimed " + name, "failed", [describe(matcher, actual, expected)]))
             continue
-        if kind == "whenfailed" and not swallowed:
-            continue
-        if agrees(matcher, actual, expected):
+        if kind == "twice":
+            check(step, swallow=True)
+            retry.append(step)
             continue
         if kind == "swallowed":
-            swallowed = True
+            if not check(step, swallow=True):
+                swallowed = True
             continue
-        messages.append(describe(matcher, actual, expected))
-        if kind != "soft":
-            break
+        if kind == "guarded":
+            if not check(step):
+                guarded = True
+            continue
+        if not check(step):
+            if kind != "soft":
+                break
+    if messages:
+        for step in retry + late:
+            reach(step)
+            check(step)
     results.append((name, "failed" if messages else "passed", messages))
 
+if mode == "nolog" and logged:
+    results.append(("console.log must not be called", "failed", ["expected console.log not to be called"]))
+if mode == "echo-source":
+    print(source)
 if "report" in opts and perturbed and mode == "noise":
     results.append(("noise", "failed", ["boom"]))
 
 with open(".runlog", "a", encoding="utf-8") as log:
-    log.write(json.dumps({"report": "report" in opts, "perturbed": perturbed}) + "\n")
+    log.write(json.dumps({"report": "report" in opts, "perturbed": perturbed, "marked": marked,
+                          "git": sorted(k for k in os.environ if k.startswith("GIT_"))}) + "\n")
 with open(".runlog", encoding="utf-8") as log:
     runs_so_far = len(log.read().splitlines())
 
@@ -438,10 +505,13 @@ class PerturbBatch(Scenario):
 
     LIMIT = "still green with the expected value {} replaced. The assertion does not check what it claims."
 
-    def repo(self, tests, args="--report={report}", batch=True, **perturb):
-        runner = {"files": "test/**", "command": "python3 tools/runner.py {file}"}
+    def repo(self, tests, args="--report={report}", batch=True, command_args="", baseline_args=None, **perturb):
+        # `args` reach the runner only in batch rounds; `command_args` in every run, baseline included.
+        runner = {"files": "test/**", "command": ("python3 tools/runner.py {file} " + command_args).strip()}
         if batch:
             runner["batch"] = {"args": args, "format": "jest-json"}
+            if baseline_args is not None:
+                runner["batch"]["baselineArgs"] = baseline_args
         repo = Repo(self, {**CONFIG, "perturb": {"runners": [runner], "max": 12, **perturb}})
         repo.write("tools/runner.py", RUNNER)
         repo.stage("test/a.test.ts", tests)
@@ -452,6 +522,11 @@ class PerturbBatch(Scenario):
         with open(os.path.join(repo.root, ".runlog"), encoding="utf-8") as handle:
             return [(run["report"], {int(k): v for k, v in run["perturbed"].items()}) for run in map(json.loads, handle)]
 
+    def marked(self, repo):
+        """Which runs had the lock's markers in the file (the instrumented baseline)."""
+        with open(os.path.join(repo.root, ".runlog"), encoding="utf-8") as handle:
+            return [json.loads(line)["marked"] for line in handle]
+
     def shape(self, repo):
         """The same, reduced to (report requested, [lines]) to compare with what is expected."""
         return [(report, sorted(lines)) for report, lines in self.runs(repo)]
@@ -460,9 +535,9 @@ class PerturbBatch(Scenario):
         """Files the lock left in the system temporary folder (TMPDIR is private to the run)."""
         return os.listdir(os.path.join(repo.root, "tmp"))
 
-    def perturb(self, repo, *args):
+    def perturb(self, repo, *args, env=None):
         os.makedirs(os.path.join(repo.root, "tmp"), exist_ok=True)
-        return repo.run("perturb", *args, env={"TMPDIR": os.path.join(repo.root, "tmp")})
+        return repo.run("perturb", *args, env={"TMPDIR": os.path.join(repo.root, "tmp"), **(env or {})})
 
     GOOD_FOUR = "test one\n  expect(1).toBe(1)\ntest two\n  expect(2).toBe(2)\ntest three\n  expect(3).toBe(3)\ntest four\n  expect(4).toBe(4)\n"
     GOOD_BESIDE_BAD = "test one\n  expect(1).toBe(1)\ntest two\n  unchecked(2).toBe(2)\ntest three\n  expect(3).toBe(3)\n"
@@ -580,7 +655,9 @@ class PerturbBatch(Scenario):
     def test_bites_when_the_test_is_already_red(self):
         repo = self.repo("test one\n  expect(4).toBe(5)\ntest two\n  expect(1).toBe(1)\n")
         self.expect(self.perturb(repo), 1, "test/a.test.ts: the test fails before any perturbation; fix it first")
-        self.assertEqual(len(self.runs(repo)), 1, "nothing is perturbed over a red baseline")
+        # The instrumented baseline fails, and so does the plain one that confirms it.
+        self.assertEqual(self.shape(repo), [(False, [2]), (False, [2])], "nothing is perturbed over a red baseline")
+        self.assertEqual(self.marked(repo), [True, False])
 
     def test_a_boolean_that_checks_nothing_is_flipped_when_checked_alone(self):
         repo = self.repo("test one\n  expect(true).toBe(true)\ntest two\n  unchecked(false).toBe(false)\n")
@@ -643,17 +720,119 @@ class PerturbBatch(Scenario):
                 repo.stage("test/a.test.ts", self.GOOD_FOUR)
                 self.expect(repo.run("perturb"), 2, "cannot look, so it does not pass")
 
-    # --- known limit, documented in the README -----------------------------
+    # --- an assertion must be reached when nothing is perturbed ------------
+    #
+    # Each case puts a good assertion in the batch that makes the other one run. The
+    # old lock, which perturbs one assertion at a time, reports the other one.
 
-    def test_known_limit_an_assertion_that_only_runs_after_another_one_failed(self):
-        # `whenfailed` is a catch block: it executes only when the `swallowed` assertion
-        # fails. In the batch both are perturbed, so it executes and fails: proven. Alone it
-        # would never run and the old lock would report it. The README states this limit.
-        repo = self.repo("test one\n  swallowed(4).toBe(4)\n  whenfailed(5).toBe(5)\n")
+    def test_bites_on_an_assertion_in_a_catch_block(self):
+        repo = self.repo("test one\n  guarded(4).toBe(4)\n  whenfailed(5).toBe(5)\ntest two\n  expect(1).toBe(1)\n")
         code, out = self.perturb(repo)
         self.assertEqual(code, 1, out)
-        self.assertIn("test/a.test.ts:2: " + self.LIMIT.format(4), out)
-        self.assertNotIn("test/a.test.ts:3:", out)
+        self.assertIn("test/a.test.ts:3: " + self.LIMIT.format(5), out)
+        self.assertEqual(out.count("BLOCKED"), 1, out)
+        # The catch block was not reached in the baseline, so it never joined the batch.
+        self.assertEqual(self.shape(repo), [(False, []), (True, [2, 5]), (False, [3])])
+        self.assertEqual(self.marked(repo), [True, False, False])
+
+    def test_bites_on_an_assertion_in_an_after_each_that_checks_the_result(self):
+        repo = self.repo("test one\n  expect(4).toBe(4)\n  afterfailed(5).toBe(5)\ntest two\n  expect(1).toBe(1)\n")
+        code, out = self.perturb(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("test/a.test.ts:3: " + self.LIMIT.format(5), out)
+        self.assertEqual(out.count("BLOCKED"), 1, out)
+        self.assertEqual(self.shape(repo), [(False, []), (True, [2, 5]), (False, [3])])
+
+    def test_bites_on_an_assertion_that_runs_only_when_a_flag_was_not_set(self):
+        # Test one sets the flag when it gets to its end; the failing assertion of the batch
+        # stops it before, and the assertion behind `if (!flag)` would run.
+        repo = self.repo("test one\n  expect(4).toBe(4)\n  setflag\ntest two\n  unlessflag(5).toBe(5)\ntest three\n  expect(1).toBe(1)\n")
+        code, out = self.perturb(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("test/a.test.ts:5: " + self.LIMIT.format(5), out)
+        self.assertEqual(out.count("BLOCKED"), 1, out)
+        self.assertEqual(self.shape(repo), [(False, []), (True, [2, 7]), (False, [5])])
+
+    def test_a_marker_in_the_echoed_source_is_not_a_marker_from_running(self):
+        # A runner that prints the source it read (a code frame) must not fake a "seen".
+        repo = self.repo(
+            "test one\n  guarded(4).toBe(4)\n  whenfailed(5).toBe(5)\ntest two\n  expect(1).toBe(1)\n",
+            command_args="--mode=echo-source",
+        )
+        self.expect(self.perturb(repo), 1, "test/a.test.ts:3: " + self.LIMIT.format(5))
+
+    def test_known_limit_one_line_that_runs_twice_swallowed_and_then_surfacing(self):
+        # The same assertion line runs in the normal flow, where its failure is swallowed
+        # (so it is seen, and alone it would stay green), and once more after the test has
+        # failed, where it surfaces. Reaching the line in the baseline does not tell the two
+        # contexts apart. The README states this limit; this pins it.
+        repo = self.repo("test one\n  twice(5).toBe(5)\n  expect(4).toBe(4)\ntest two\n  expect(1).toBe(1)\n")
+        code, out = self.perturb(repo)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("test/a.test.ts:2:", out)
+
+    def test_an_assertion_that_is_seen_and_good_is_proven_in_the_batch(self):
+        repo = self.repo(self.GOOD_FOUR)
+        self.expect(self.perturb(repo), 0)
+        self.assertEqual(self.marked(repo), [True, False])
+
+    # --- when the instrumented baseline cannot tell -----------------------
+
+    def test_a_test_that_fails_when_console_log_is_called_gets_todays_verdicts(self):
+        repo = self.repo(self.GOOD_BESIDE_BAD, command_args="--mode=nolog")
+        code, out = self.perturb(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("test/a.test.ts:4: " + self.LIMIT.format(2), out)
+        self.assertEqual(out.count("BLOCKED"), 1, out)
+        self.assertIn("note: test/a.test.ts: the batch could not tell which assertions run", out)
+        # Instrumented baseline (fails), plain baseline (passes), then each one alone.
+        self.assertEqual(self.shape(repo), [(False, []), (False, []), (False, [2]), (False, [4]), (False, [6])])
+        self.assertEqual(self.marked(repo), [True, False, False, False, False])
+
+    def test_no_marker_in_the_output_gets_todays_verdicts_at_no_extra_run(self):
+        repo = self.repo(self.GOOD_BESIDE_BAD, command_args="--mode=silent")
+        code, out = self.perturb(repo)
+        self.assertEqual(code, 1, out)
+        self.assertIn("test/a.test.ts:4: " + self.LIMIT.format(2), out)
+        self.assertEqual(out.count("BLOCKED"), 1, out)
+        self.assertIn("note: test/a.test.ts: the batch could not tell which assertions run", out)
+        self.assertEqual(self.shape(repo), [(False, []), (False, [2]), (False, [4]), (False, [6])])
+        self.assertEqual(self.marked(repo), [True, False, False, False])
+
+    def test_a_reporter_that_hides_the_output_of_passing_tests_needs_baseline_args(self):
+        # Vitest 4 swaps in a quiet reporter when an AI agent runs it: the markers of passing
+        # tests never reach the output. `baselineArgs` asks for a reporter that shows them.
+        quiet = self.repo(self.GOOD_FOUR, command_args="--quiet")
+        code, out = self.perturb(quiet)
+        self.assertEqual(code, 0, out)
+        self.assertIn("the batch could not tell which assertions run", out)
+        self.assertEqual(self.shape(quiet), [(False, []), (False, [2]), (False, [4]), (False, [6]), (False, [8])])
+        loud = self.repo(self.GOOD_FOUR, command_args="--quiet", baseline_args="--console")
+        self.expect(self.perturb(loud), 0)
+        self.assertEqual(self.shape(loud), [(False, []), (True, [2, 4, 6, 8])])
+
+    def test_baseline_args_that_are_not_a_string_are_an_error(self):
+        repo = Repo(self, {**CONFIG, "perturb": {"runners": [{"files": "test/**", "command": "python3 tools/runner.py {file}", "batch": {"args": "--report={report}", "format": "jest-json", "baselineArgs": 3}}]}})
+        repo.write("tools/runner.py", RUNNER)
+        repo.stage("test/a.test.ts", self.GOOD_FOUR)
+        self.expect(repo.run("perturb"), 2, "cannot look, so it does not pass")
+
+    # --- the runner does not see the hook's git environment -----------------
+
+    def test_the_runner_is_launched_without_the_git_variables_of_a_hook(self):
+        repo = self.repo(self.GOOD_FOUR)
+        git_dir = os.path.join(repo.root, ".git")
+        env = {"GIT_DIR": git_dir, "GIT_WORK_TREE": repo.root, "GIT_INDEX_FILE": os.path.join(git_dir, "index"), "GIT_AUTHOR_NAME": "someone"}
+        self.expect(self.perturb(repo, env=env), 0)
+        with open(os.path.join(repo.root, ".runlog"), encoding="utf-8") as handle:
+            seen = [json.loads(line)["git"] for line in handle]
+        self.assertEqual(seen, [[], []], "the runner saw GIT_* variables")
+
+    def test_a_runner_without_batch_is_launched_without_them_too(self):
+        repo = self.repo(self.GOOD_BESIDE_BAD, batch=False)
+        self.perturb(repo, env={"GIT_DIR": os.path.join(repo.root, ".git"), "GIT_WORK_TREE": repo.root})
+        with open(os.path.join(repo.root, ".runlog"), encoding="utf-8") as handle:
+            self.assertEqual([json.loads(line)["git"] for line in handle], [[]] * 4)
 
 
 class Wiring(Scenario):
