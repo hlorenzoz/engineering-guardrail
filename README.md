@@ -52,7 +52,7 @@ block new work.
          {
            "files": "test/**",
            "command": "bunx vitest run {file}",
-           "batch": { "args": "--reporter=json --outputFile={report}", "format": "jest-json" }
+           "batch": { "args": "--reporter=json --outputFile={report}", "format": "jest-json", "baselineArgs": "--reporter=default" }
          }
        ],
        "max": 12,
@@ -104,35 +104,57 @@ the assertions of a file together:
 
 ```json
 { "files": "test/**", "command": "bunx vitest run {file}",
-  "batch": { "args": "--reporter=json --outputFile={report}", "format": "jest-json" } }
+  "batch": { "args": "--reporter=json --outputFile={report}", "format": "jest-json", "baselineArgs": "--reporter=default" } }
 ```
 
 The lock appends `args` to the command. `{report}` is a temporary file it creates and
 removes. `format` is the shape of the report; `jest-json` is Jest's JSON
 (`testResults[].assertionResults[]` with `status` and `failureMessages[]`), which
-Vitest's `json` reporter also writes. A `batch` that is not an object, names another
+Vitest's `json` reporter also writes. `baselineArgs` (optional) is appended to the
+command of the instrumented baseline only. It must make the runner show the output of
+passing tests: **Vitest 4 swaps in a quiet reporter when an AI agent runs it** (it reads
+`AI_AGENT` or `CLAUDECODE`), which prints nothing for a passing test, so without
+`"--reporter=default"` the markers never come back in an agent's commit. A `batch` that is not an object, names another
 format or has no `{report}` is a configuration error (exit 2). A runner without `batch`
 behaves as it always did: one baseline run, then one run per assertion.
 
 How it proves, per test file:
 
-1. **Baseline.** The unperturbed file runs once and must pass, as always.
-2. **A sentinel of its own for every assertion.** Each expected value is replaced by a
-   number (`988654003`, `989654006`, ...) or a string (`ZZ_MUTATED_<n>_ZZ`). A boolean
+1. **Baseline, instrumented.** The unperturbed file runs once and must pass, as always.
+   For this run only, each expected value is wrapped so that reaching the matcher call
+   prints a marker: `.toBe(5)` becomes `.toBe((console.log("ZZ_SEEN_" + "<nonce>_<k>" + "_ZZ"), 5))`.
+   Same value, same line. The marker is built at run time from pieces, so only executing
+   the call prints it; the file's own text (echoed in a code frame, say) never contains it.
+   After the run, an assertion is *reached* when its marker is in the runner's output
+   (stdout or stderr). It costs no run: it is the baseline.
+2. **Only a reached assertion may count on the batch.** One whose marker did not come back
+   (it sits in a `catch` block, in an `afterEach` that checks the test's result, behind
+   `if (!flag)`) is checked one by one, like today, and gets today's verdict.
+3. **A sentinel of its own for every reached assertion.** Each expected value is replaced
+   by a number (`988654003`, `989654006`, ...) or a string (`ZZ_MUTATED_<n>_ZZ`). A boolean
    also gets a number: it cannot carry an identity, and comparing it with a number fails
    for the same reason. A sentinel that already occurs in the file is never used.
-3. **One run, read from the report.** An assertion is proven when ITS sentinel appears in
+4. **One run, read from the report.** An assertion is proven when ITS sentinel appears in
    a failure message of a test whose status is `failed`. Nothing else counts: not the exit
    code, not a failed test without the sentinel, not a sentinel in a passed or skipped
    test, not a line number (a stack trace names the callers' lines).
-4. **Rounds.** The first failure of a test ends it, so an assertion behind a failing one
+5. **Rounds.** The first failure of a test ends it, so an assertion behind a failing one
    is not reached. The lock restores each proven assertion and runs again with the rest,
    until a round proves nothing or one assertion is left.
-5. **Whatever is not proven is checked the old way**, one at a time, with the old
+6. **Whatever is not proven is checked the old way**, one at a time, with the old
    sentinel and the old rule (green means "does not check what it claims"). The batch
    never reports a problem: it can only say "proven", on positive evidence. If the report
    is missing, unreadable, of another shape, the run timed out or exited 0, that round
    proves nothing and everything left goes through the one-by-one check.
+
+If the instrumented baseline fails, the plain baseline runs: if that fails too, the test
+is red ("fails before any perturbation"); if it passes, the markers broke the test (one
+that counts `console.log` calls, say) and nothing is reached. If the run passes and no
+marker comes back (a silent reporter, a spy that swallows the output), nothing is reached
+either. In both cases every assertion is checked one by one, the verdicts are today's, and
+the hook prints `note: <file>: the batch could not tell which assertions run`. A project
+that sees that note on every commit gets no gain from `batch`; the worst case is today's
+cost plus one run (the plain baseline).
 
 A file with one assertion is not batched: a batch of one is the run it replaces.
 Cost: the baseline plus one run when every new assertion is in its own test; plus one
@@ -140,17 +162,25 @@ for each further assertion in the longest chain inside one test.
 
 ### What the batch proves, and when it would not
 
-The claim is: *if sentinel k is in the failure message of a failed test during a batch
-round, the run also fails when only assertion k is perturbed*. It rests on two things:
+The claim is: *if the assertion's matcher call executes in the unperturbed run, and its
+sentinel is in the failure message of a failed test during a batch round, the run also
+fails when only that assertion is perturbed.* It rests on two things:
 
 - **The tests are deterministic.** A flaky test is as unreliable here as in any run.
-- **Whether an assertion executes does not depend on ANOTHER assertion or test having
-  failed.** In a batch, assertions are made to fail at the same time, so code that runs
-  only after a failure runs here and would not run alone. The cases: an assertion in a
-  `catch` block, or in an `afterEach` that checks the test's result; a test that reads a
-  flag another test sets only when it gets past its own assertion; a test that reads its
-  own source and prints it in a message. For these the batch can say "proven" where the
-  one-by-one check would say "does not check". A scenario pins the first case.
+- **An assertion that executes in the unperturbed run executes the same way when other
+  assertions fail.** The reached check closes the cases where an assertion does not
+  execute at all without a failure (a catch block, an `afterEach` on failure,
+  `if (!flag)`). What it cannot close is one line that executes in TWO dynamic contexts:
+  in the normal flow, where its failure is swallowed (so it is reached, and alone it
+  stays green), and again only after another assertion failed, where it surfaces. The
+  smallest example, built and run on Vitest 4: `const check = () => expect(1).toBe(1)`,
+  and a test that calls it inside `try { check() } catch {}`, registers
+  `onTestFailed(() => check())`, then has another assertion that is perturbed and fails.
+  The one-by-one check reports the assertion inside `check` ("still green"); the batch proves it.
+  It needs a swallowed assertion AND the same line re-run by a failure hook; no other
+  case was found. The scenario
+  `test_known_limit_one_line_that_runs_twice_swallowed_and_then_surfacing` pins it.
+- Also not covered: a test that reads its own source and prints it in a message.
 
 Also checked on real runners (Vitest 4, jsdom and the Cloudflare Workers pool) and not a
 problem: `expect.soft` (every message is kept), `it.each` (one sentinel, every row),
@@ -160,6 +190,14 @@ numbers (printed in plain digits, no separators). The report has stack frames wi
 `file:line:column` but no code frame. `toBeCloseTo` prints the DIFFERENCE between the
 received and the expected value, which is why sentinels are a million apart: sentinels
 one apart would make a small received value print another assertion's sentinel.
+
+### The runner does not see the hook's git variables
+
+The lock launches the project's test command without any `GIT_*` variable (`GIT_DIR`,
+`GIT_INDEX_FILE`, ...). Under a commit hook git sets them for the repository being
+committed, and a test that runs `git init` or `git config` in a scratch folder would
+write into that repository instead. The cost: a test that needs a `GIT_*` variable
+(`GIT_SSH_COMMAND`, `GIT_CONFIG_GLOBAL`) must set it itself; none of the projects' do.
 
 ## Honest limits
 
