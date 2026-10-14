@@ -34,11 +34,12 @@ Operating guide for AI agents working in this repository: the shared git hooks
 | Path | Holds |
 | :--- | :--- |
 | `guardrail/core.py` | Configuration, path classification, git access, hatches |
-| `guardrail/locks.py` | The locks and the built-in canaries |
+| `guardrail/locks.py` | The locks and the built-in canaries; the one reader of a Jest-shaped report |
+| `guardrail/perf.py` | The timing record of the full suite (`perf-gate`), a command and not a lock |
 | `guardrail/cli.py` | Commands, messages and exit codes |
 | `bin/guardrail` | The entry point the hooks call |
 | `.pre-commit-hooks.yaml` | The hooks offered to projects |
-| `tests/` | Scenarios and mutants; `log.sh` and the complete output of the last run of each (`tests_<name>.txt`, not versioned) |
+| `tests/` | Scenarios and mutants (`GUARDRAIL_MUTANTS=<text>` narrows a run while working); `log.sh` and the complete output of the last run of each (`tests_<name>.txt`, not versioned) |
 
 ## Releasing
 

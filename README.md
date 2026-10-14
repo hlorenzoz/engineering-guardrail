@@ -259,6 +259,38 @@ Notes appear on stderr, which `pre-commit` shows only when a hook fails. So a pr
 hook never writes the report gets no complaint: check it once by hand
 (`python3 bin/guardrail commit-gate .git/COMMIT_EDITMSG` after a commit that stages a test).
 
+## The push suite's timing record: `perf-gate`
+
+A command, not a lock: it never blocks a commit. After a full run it records how long the
+suite took, so a suite that slowly gets slower is noticed when it grows and not when it
+has become a problem.
+
+```
+guardrail perf-gate --report tests/report_full.json --history tests/perf_history.jsonl [--label push] [--strict]
+```
+
+- `--report` is the Jest-shaped JSON report (`jest-json`, the shape `perturb` and
+  `timeBudget` read; Vitest's `json` reporter writes it) of a **full** run.
+  A missing report, one that is not that shape, or one with no tests is refused (exit 2) and
+  records nothing: a run that could not be read must not become the line the next run is
+  compared with.
+- `--history` is a JSON-lines file. Each run appends one line: `date` (UTC), `commit` (the
+  short id, `null` outside a repository), `label`, `tests`, `totalMs` and `files` (the
+  sum of each test file's tests, paths relative to the repository). The run is appended
+  even when it warns. The file is the project's to keep or not in git; a line the tool did
+  not write is skipped with a note.
+- It compares with the **last line of the same label** (`--label`, default `default`). A
+  different label is never compared: the push suite and a release run are different curves.
+- It **warns** (stderr, exit 0) when the total grew more than 10% (`TOTAL_GROWTH`), or a file
+  grew more than 2x (`FILE_FACTOR`) and now takes more than 100 ms (`FILE_FLOOR_MS`: below
+  it a duration is noise, so a 5 ms file that triples says nothing). A file that is new has
+  no previous duration and cannot warn. `--strict` turns a warning into exit 1.
+- It prints what a person reads: tests and total against the previous run, and the ten files
+  (`TOP_FILES`) that grew most, biggest first, with the new ones marked.
+
+The thresholds are named constants in `guardrail/perf.py`, not configuration: a project does
+not tune how much slower is too slow.
+
 ## Honest limits
 
 - **The size cap and the cross-view rule trust a typed reason.** A hatch is a person's
@@ -273,6 +305,10 @@ hook never writes the report gets no complaint: check it once by hand
   borderline fails on a busy day). A staged file that `pre-commit` rewrote while restoring
   unstaged changes looks newer than the report and is skipped with a note. A test the
   related run never executes is never timed here; the push suite is its backstop.
+- **`perf-gate` compares durations measured on whatever machine ran the suite.** A busy day
+  looks like growth. It is a trend to look at, which is why it warns and why `--strict` is
+  opt-in. The history is only as good as the runs that feed it: run it from the same place
+  (the push) every time, under one label.
 - **A one-by-one check counts any non-zero exit as "fails".** A crash, a timeout or a
   syntax error in the perturbed file also kills the mutant. The batch is stricter: it
   needs the sentinel in a failed test's message.
