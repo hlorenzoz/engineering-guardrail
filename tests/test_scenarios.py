@@ -1106,6 +1106,24 @@ class PerfGate(Scenario):
         self.gate(repo, files={"test/a.test.ts": [1000]})
         self.assertEqual({entry["label"] for entry in self.history(repo)}, {self.perf().DEFAULT_LABEL})
 
+    def test_the_default_label_is_named_default_so_a_run_can_name_it(self):
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [1000]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [1000]}, label="default")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("no previous run", out)
+
+    def test_a_file_that_took_no_time_before_is_listed_without_a_ratio_and_does_not_warn(self):
+        perf = self.perf()
+        repo = Repo(self)
+        now = perf.FILE_FLOOR_MS * 4
+        self.gate(repo, files={"test/a.test.ts": [0], "test/b.test.ts": [10**6]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [now], "test/b.test.ts": [10**6]})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("test/a.test.ts grew", out)
+        (line,) = [row for row in out.splitlines() if row.strip().startswith("test/a.test.ts")]
+        self.assertNotRegex(line, r"\dx\)")  # no ratio against a duration of zero
+
     def test_a_test_without_a_duration_counts_as_zero(self):
         repo = Repo(self)
         repo.write(self.REPORT, json.dumps({"testResults": [{"name": os.path.join(repo.root, "test/a.test.ts"), "assertionResults": [
@@ -1478,6 +1496,24 @@ class FkIndex(Scenario):
     def test_a_statement_inside_a_function_body_is_not_executed_by_the_migration(self):
         sql = 'CREATE FUNCTION f() RETURNS void AS $body$\nBEGIN\n  ALTER TABLE "invoices" ADD COLUMN "z" uuid REFERENCES "clients"("id");\nEND $body$ LANGUAGE plpgsql;\n'
         self.expect(self.repo({"drizzle/0002_f.sql": sql}).gate("feat: migration\n"), 0)
+
+    def test_a_function_body_with_several_statements_is_still_one_quoted_body(self):
+        sql = (
+            'CREATE FUNCTION f() RETURNS void AS $body$\nBEGIN\n  PERFORM 1;\n'
+            '  ALTER TABLE "invoices" ADD COLUMN "z" uuid REFERENCES "clients"("id");\nEND $body$ LANGUAGE plpgsql;\n'
+        )
+        self.expect(self.repo({"drizzle/0002_f.sql": sql}).gate("feat: migration\n"), 0)
+
+    def test_a_separator_inside_a_quoted_name_does_not_split_the_statement(self):
+        sql = self.INVOICES + self.FK + 'CREATE INDEX "invoices_client;idx" ON "invoices" USING btree ("client_id");\n'
+        self.expect(self.repo({"drizzle/0002_invoices.sql": sql}).gate("feat: migration\n"), 0)
+
+    def test_an_expression_index_does_not_cover_a_key_on_a_column_named_like_its_function(self):
+        sql = (
+            'CREATE TABLE "notes" (\n  "id" uuid PRIMARY KEY,\n  "lower" uuid REFERENCES "clients"("id")\n);\n'
+            'CREATE INDEX "notes_lower_idx" ON "notes" (lower("id"::text));\n'
+        )
+        self.expect(self.repo({"drizzle/0002_notes.sql": sql}).gate("feat: migration\n"), 1, "foreign key on notes (lower)")
 
     def test_judges_only_the_migrations_this_commit_stages(self):
         committed = {"drizzle/0001_invoices.sql": self.INVOICES + self.FK}  # an old, unindexed key
