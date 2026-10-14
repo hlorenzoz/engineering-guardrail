@@ -28,6 +28,8 @@ DEFAULTS = {
     "switchedOn": {"registry": ".agents/SWITCHED_ON.md", "triggers": [], "staleDays": 30},
     # None switches a lock off: it runs only for a project that writes the block.
     "timeBudget": None,
+    # Same for the foreign-key index lock: {"migrations": [globs], "leadingColumnsIgnored": [columns]}.
+    "fkIndex": None,
 }
 
 

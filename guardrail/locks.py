@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from typing import NamedTuple
 
-from . import core
+from . import core, schema
 
 # --- no fake tests ---------------------------------------------------------
 
@@ -148,7 +148,79 @@ def switch_on_trigger(root: str, config: core.Config, message: str) -> list[str]
     ]
 
 
-COMMIT_GATE = [fix_needs_test, size_cap, cross_view, switch_on_trigger]
+# --- every foreign key a migration adds has an index ------------------------
+#
+# A foreign key without an index makes every delete or update of the referenced row scan the
+# whole referencing table, and every join through it too. It costs nothing while the table is
+# small and a great deal later, so it is cheapest to refuse when the migration is written.
+# The migrations are read as text (`guardrail/schema.py`); README, "Honest limits", says what
+# that reading does not see.
+
+NO_INDEX = "no-index"
+_FK_INDEX_KEYS = {"migrations", "leadingColumnsIgnored"}
+
+
+def _fk_index_settings(config: core.Config):
+    """The validated `fkIndex` block as (migration globs, ignored leading columns); None when off."""
+    raw = config["fkIndex"]
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("migrations"), list) or not raw["migrations"] or not all(isinstance(g, str) for g in raw["migrations"]):
+        raise core.GuardrailError('fkIndex must be an object with "migrations", a list of globs for the migration files')
+    ignored = raw.get("leadingColumnsIgnored", [])
+    if not isinstance(ignored, list) or not all(isinstance(c, str) for c in ignored):
+        raise core.GuardrailError("fkIndex.leadingColumnsIgnored must be a list of column names")
+    if set(raw) - _FK_INDEX_KEYS:
+        raise core.GuardrailError("fkIndex has unknown key(s): " + ", ".join(sorted(set(raw) - _FK_INDEX_KEYS)))
+    return raw["migrations"], frozenset(c.lower() for c in ignored)
+
+
+def fk_index(root: str, config: core.Config, message: str) -> list[str]:
+    """A foreign key added by a staged migration needs an index that leads with its columns.
+
+    The whole set of migration files is replayed in order (as they will be committed), so an
+    index made in an earlier file counts and one a later file dropped does not. Only the keys
+    that a STAGED migration adds are judged."""
+    settings = _fk_index_settings(config)
+    if settings is None:
+        return []
+    globs, ignored = settings
+    staged = {p for p in core.staged_files(root) if core.matches(p, globs)}
+    if not staged:
+        return []
+    replay = schema.Schema()
+    for path in sorted(p for p in core.git(root, "ls-files", "-z").split("\0") if p and core.matches(p, globs)):
+        replay.apply(core.staged_text(root, path), path)
+    missing = schema.unindexed(replay, staged, ignored)
+    problems, excused = [], []
+    for body in core.hatch_lines(message, NO_INDEX):
+        target, bar, reason = (part.strip() for part in body.partition("|"))
+        named = re.fullmatch(rf"({schema.IDENT})\s*\.\s*({schema.IDENT})", target)
+        shown = f'"no-index: {body}"'
+        if not bar or not named:
+            problems.append(f'no-index: expected "<table>.<column> | <reason>", got {shown}')
+        elif len(reason) < core.MIN_REASON:
+            problems.append(f"no-index: a reason of at least {core.MIN_REASON} characters is missing in {shown}")
+        else:
+            table, column = schema.name_of(named.group(1)), schema.name_of(named.group(2))
+            matched = [key for key in missing if key.table == table and column in key.columns]
+            if not matched:
+                problems.append(f'no-index: "{target}" names no foreign key without an index (a stale line, or a typo)')
+            excused += matched
+    for key in missing:
+        if key in excused:
+            continue
+        required = schema.required_columns(key, ignored)
+        quoted = ", ".join(f'"{column}"' for column in required)
+        problems.append(
+            f"{key.file}: foreign key on {key.table} ({', '.join(key.columns)}) -> {key.target} has no index that leads with ({', '.join(required)}). "
+            f'Add one in the migration (CREATE INDEX ... ON "{key.table}" ({quoted})), '
+            f"or add a line `no-index: {key.table}.{required[0]} | <why it needs none>` to the commit message."
+        )
+    return problems
+
+
+COMMIT_GATE = [fix_needs_test, size_cap, cross_view, switch_on_trigger, fk_index]
 
 # --- switched-on registry shape --------------------------------------------
 
