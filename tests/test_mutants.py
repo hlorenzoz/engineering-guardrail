@@ -183,6 +183,7 @@ MUTANTS = [
     ("guardrail/locks.py", "if not isinstance(ignored, list) or not all(isinstance(c, str) for c in ignored):", "if False:", "ignored columns of the wrong type are accepted"),
     ("guardrail/locks.py", "    if set(raw) - _FK_INDEX_KEYS:", "    if False:", "a misspelled foreign key lock key is ignored"),
     ("guardrail/locks.py", "COMMIT_GATE = [fix_needs_test, size_cap, cross_view, switch_on_trigger, fk_index]", "COMMIT_GATE = [fix_needs_test, size_cap, cross_view, switch_on_trigger]", "the foreign key lock is not in the commit gate"),
+    ("guardrail/locks.py", "            os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))\n", "", "a perturbed file comes back with a new modification time"),
 ]
 
 

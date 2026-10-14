@@ -463,6 +463,19 @@ class Perturb(Scenario):
         with open(os.path.join(repo.root, "test/a.test.py"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), self.script(True))
 
+    def test_restores_the_modification_time_too(self):
+        # The time budget compares a test file's modification time with the report the related
+        # tests wrote earlier in the same commit: a perturbation that left the file "newer" would
+        # make every file it touched look changed after its own report.
+        repo = Repo(self)
+        repo.stage("test/a.test.py", self.script(True))
+        target = os.path.join(repo.root, "test/a.test.py")
+        past = time.time() - 3600
+        os.utime(target, (past, past))
+        before = os.stat(target).st_mtime_ns
+        repo.run("perturb")
+        self.assertEqual(os.stat(target).st_mtime_ns, before)
+
     def test_bites_when_no_runner_is_configured(self):
         repo = Repo(self, {**CONFIG, "perturb": {"runners": []}})
         repo.stage("test/a.test.py", self.script(True))

@@ -257,6 +257,8 @@ It does not know it, it checks the cheap evidence it has, per staged test file:
 
 A commit that stages no test file is not judged at all, whatever the report says.
 
+`perturb` rewrites the staged test files while it proves them and puts them back with the same content **and the same modification time**, so running it after the related tests does not make every file look newer than its report.
+
 Notes appear on stderr, which `pre-commit` shows only when a hook fails. So a project whose
 hook never writes the report gets no complaint: check it once by hand
 (`python3 bin/guardrail commit-gate .git/COMMIT_EDITMSG` after a commit that stages a test).

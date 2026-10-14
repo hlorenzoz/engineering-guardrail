@@ -630,11 +630,15 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
         target = os.path.join(root, path)
         with open(target, encoding="utf-8") as handle:
             original = handle.read()
+        stamp = os.stat(target)
         scratch = []  # the folder the batch reports go in, removed with the file restored
 
         def restore(*_args):
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(original)
+            # Same content, so the same modification time: the time budget reads it to know
+            # whether a report written earlier in the commit still describes this file.
+            os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
             while scratch:
                 shutil.rmtree(scratch.pop(), ignore_errors=True)
 
