@@ -1041,6 +1041,276 @@ class TimeBudget(Scenario):
                 self.expect(repo.gate("test: more\n"), 2, "cannot look, so it does not pass")
 
 
+class PerfGate(Scenario):
+    """`guardrail perf-gate`: the push suite's timing record. It appends one line per full run to a
+    history and compares it with the previous line of the same label. Not a lock: it warns."""
+
+    REPORT, HISTORY = "tests/report_full.json", "tests/perf_history.jsonl"
+
+    @staticmethod
+    def perf():
+        """The module under test, for its thresholds: they are named constants, and the scenarios
+        are written relative to them. (A literal check of their values is one test, below.)"""
+        sys.path.insert(0, HOME)
+        try:
+            from guardrail import perf
+            return perf
+        finally:
+            sys.path.remove(HOME)
+
+    def report(self, repo, files, name=REPORT):
+        """A Jest-shaped report. `files` is {path: [ms, ...]}, one test per duration."""
+        repo.write(name, json.dumps({"testResults": [
+            {"name": os.path.join(repo.root, path), "assertionResults": [
+                {"title": f"t{n}", "fullName": f"{path} t{n}", "status": "passed", "failureMessages": [], "duration": ms}
+                for n, ms in enumerate(durations)]}
+            for path, durations in files.items()]}))
+
+    def gate(self, repo, *extra, files=None, label=None):
+        if files is not None:
+            self.report(repo, files)
+        args = ["perf-gate", "--report", self.REPORT, "--history", self.HISTORY, *extra]
+        return repo.run(*(args + ["--label", label] if label else args))
+
+    def history(self, repo):
+        with open(os.path.join(repo.root, self.HISTORY), encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle.read().splitlines()]
+
+    # --- recording ---------------------------------------------------------
+
+    def test_the_first_run_is_recorded_and_has_nothing_to_compare_with(self):
+        repo = Repo(self)
+        self.expect(self.gate(repo, files={"test/a.test.ts": [100, 200], "test/b.test.ts": [50]}, label="push"), 0, "no previous run")
+        (entry,) = self.history(repo)
+        self.assertEqual((entry["label"], entry["tests"], entry["totalMs"]), ("push", 3, 350))
+        self.assertEqual(entry["files"], {"test/a.test.ts": 300, "test/b.test.ts": 50})  # relative to the repository
+        self.assertRegex(entry["date"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(entry["commit"], repo_head(repo))
+
+    def test_a_run_without_a_label_has_the_default_one_and_is_compared_with_it(self):
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [1000]})
+        self.gate(repo, files={"test/a.test.ts": [1000]})
+        self.assertEqual({entry["label"] for entry in self.history(repo)}, {self.perf().DEFAULT_LABEL})
+
+    def test_a_test_without_a_duration_counts_as_zero(self):
+        repo = Repo(self)
+        repo.write(self.REPORT, json.dumps({"testResults": [{"name": os.path.join(repo.root, "test/a.test.ts"), "assertionResults": [
+            {"title": "skipped", "status": "pending", "failureMessages": [], "duration": None},
+            {"title": "real", "status": "passed", "failureMessages": [], "duration": 40}]}]}))
+        self.expect(repo.run("perf-gate", "--report", self.REPORT, "--history", self.HISTORY), 0)
+        (entry,) = self.history(repo)
+        self.assertEqual((entry["tests"], entry["totalMs"]), (2, 40))
+
+    def test_it_records_without_a_repository_and_says_no_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "r.json"), "w", encoding="utf-8") as handle:
+                json.dump({"testResults": [{"name": "a.test.ts", "assertionResults": [{"title": "t", "status": "passed", "failureMessages": [], "duration": 5}]}]}, handle)
+            result = subprocess.run(["python3", BIN, "perf-gate", "--report", "r.json", "--history", "h.jsonl"], cwd=tmp, capture_output=True, text=True, env=CLEAN_ENV)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(os.path.join(tmp, "h.jsonl"), encoding="utf-8") as handle:
+                entry = json.loads(handle.read())
+            self.assertIsNone(entry["commit"])
+            self.assertEqual(entry["files"], {"a.test.ts": 5})
+
+    def test_each_run_appends_a_line_and_is_compared_with_the_last_one_of_its_label(self):
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [500]}, label="push")
+        self.gate(repo, files={"test/a.test.ts": [1000]}, label="push")
+        self.gate(repo, files={"test/a.test.ts": [100_000]}, label="other")
+        # The last "push" line is 1000: a run at exactly that is no growth, though it would be
+        # against the first "push" line (500).
+        code, out = self.gate(repo, label="push", files={"test/a.test.ts": [1000]})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARNING", out)
+        self.assertEqual([e["label"] for e in self.history(repo)], ["push", "push", "other", "push"])
+
+    def test_a_different_label_is_not_compared(self):
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [1000]}, label="push")
+        code, out = self.gate(repo, files={"test/a.test.ts": [10**6]}, label="release")
+        self.assertEqual(code, 0, out)
+        self.assertIn("no previous run", out)
+        self.assertNotIn("WARNING", out)
+
+    # --- warning ---------------------------------------------------------
+
+    def test_warns_when_the_total_grows_more_than_the_threshold_and_exits_zero(self):
+        perf = self.perf()
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [10_000]})
+        grown = int(10_000 * (1 + perf.TOTAL_GROWTH)) + 1
+        code, out = self.gate(repo, files={"test/a.test.ts": [grown]})
+        self.assertEqual(code, 0, out)
+        self.assertIn("WARNING: the total duration grew", out)
+        self.assertIn(f"+{(grown - 10_000) / 10_000 * 100:.1f}%", out)
+        self.assertIn(f"from 10000 ms to {grown} ms", out)
+
+    def test_stays_quiet_at_the_total_threshold_and_below(self):
+        perf = self.perf()
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [10_000]})
+        at = int(10_000 * (1 + perf.TOTAL_GROWTH))
+        for total in (at, at - 1, 5_000):
+            with self.subTest(total=total):
+                code, out = self.gate(repo, files={"test/a.test.ts": [total]})
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("WARNING", out)
+
+    def test_warns_when_one_file_grows_more_than_the_factor(self):
+        perf = self.perf()
+        repo = Repo(self)
+        base = perf.FILE_FLOOR_MS * 4
+        self.gate(repo, files={"test/a.test.ts": [base], "test/b.test.ts": [100_000]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [int(base * perf.FILE_FACTOR) + 1], "test/b.test.ts": [100_000]})
+        self.assertEqual(code, 0, out)
+        grown = int(base * perf.FILE_FACTOR) + 1
+        self.assertIn(f"WARNING: test/a.test.ts grew {grown / base:.1f}x (from {base} ms to {grown} ms)", out)
+        self.assertNotIn("test/b.test.ts grew", out)
+        self.assertNotIn("the total duration grew", out)  # a small file does not move the total past its threshold
+
+    def test_stays_quiet_when_a_file_is_exactly_at_the_factor(self):
+        perf = self.perf()
+        repo = Repo(self)
+        base = perf.FILE_FLOOR_MS * 4
+        self.gate(repo, files={"test/a.test.ts": [base], "test/b.test.ts": [10**6]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [int(base * perf.FILE_FACTOR)], "test/b.test.ts": [10**6]})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARNING", out)
+
+    def test_a_file_below_the_floor_is_noise_even_if_it_triples(self):
+        perf = self.perf()
+        repo = Repo(self)
+        small = perf.FILE_FLOOR_MS // 4
+        self.gate(repo, files={"test/a.test.ts": [small], "test/b.test.ts": [10**6]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [small * 3], "test/b.test.ts": [10**6]})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARNING", out)
+
+    def test_a_file_that_ends_exactly_at_the_floor_is_still_noise(self):
+        perf = self.perf()
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [perf.FILE_FLOOR_MS // 4], "test/b.test.ts": [10**6]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [perf.FILE_FLOOR_MS], "test/b.test.ts": [10**6]})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("WARNING", out)
+
+    def test_a_file_that_goes_from_below_the_floor_to_above_it_by_more_than_the_factor_warns(self):
+        perf = self.perf()
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [perf.FILE_FLOOR_MS // 4], "test/b.test.ts": [10**6]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [perf.FILE_FLOOR_MS * 3], "test/b.test.ts": [10**6]})
+        self.assertEqual(code, 0, out)
+        self.assertIn("WARNING: test/a.test.ts grew", out)
+
+    def test_a_new_file_is_not_a_growth_warning_but_is_listed(self):
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [1000]})
+        code, out = self.gate(repo, files={"test/a.test.ts": [1000], "test/new.test.ts": [50]})
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("test/new.test.ts grew", out)
+        (line,) = [line for line in out.splitlines() if "test/new.test.ts" in line]
+        self.assertIn("new", line)
+        self.assertNotIn("test/a.test.ts", out)  # unchanged: not a growth
+
+    def test_strict_turns_a_warning_into_a_failure_and_still_records_the_run(self):
+        perf = self.perf()
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [10_000]})
+        slow = {"test/a.test.ts": [int(10_000 * (1 + perf.TOTAL_GROWTH)) + 1]}
+        self.expect(self.gate(repo, "--strict", files=slow), 1, "WARNING: the total duration grew")
+        self.assertEqual(len(self.history(repo)), 2)
+
+    def test_strict_is_quiet_without_a_warning(self):
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [10_000]})
+        self.expect(self.gate(repo, "--strict", files={"test/a.test.ts": [9_000]}), 0)
+
+    def test_a_table_names_the_files_that_grew_most_and_only_the_top_ones(self):
+        perf = self.perf()
+        repo = Repo(self)
+        count = perf.TOP_FILES + 2
+        self.gate(repo, files={f"test/f{n:02}.test.ts": [1000] for n in range(count)})
+        code, out = self.gate(repo, files={f"test/f{n:02}.test.ts": [1000 + 10 * (n + 1)] for n in range(count)})
+        self.assertEqual(code, 0, out)
+        listed = [n for n in range(count) if f"test/f{n:02}.test.ts" in out]
+        self.assertEqual(listed, list(range(count - perf.TOP_FILES, count)))  # the ones that grew most
+        self.assertLess(out.index(f"test/f{count - 1:02}.test.ts"), out.index(f"test/f{count - 2:02}.test.ts"))  # biggest first
+        self.assertIn(f"{count} tests (previous {count})", out)
+
+    def test_the_decision_is_ten_percent_on_the_total_and_double_on_a_file(self):
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [1000], "test/b.test.ts": [9000]})
+        self.assertNotIn("WARNING", self.gate(repo, files={"test/a.test.ts": [1000], "test/b.test.ts": [10000]})[1])  # +10.0%: not above ten
+        repo2 = Repo(self)
+        self.gate(repo2, files={"test/a.test.ts": [1000], "test/b.test.ts": [9000]})
+        self.assertIn("WARNING: the total duration grew", self.gate(repo2, files={"test/a.test.ts": [1000], "test/b.test.ts": [10002]})[1])
+        files = {f"test/f{n:02}.test.ts": [1000] for n in range(12)}
+        repo4 = Repo(self)
+        self.gate(repo4, files=files)
+        listed = [line for line in self.gate(repo4, files={path: [1000 + 10 * (n + 1)] for n, path in enumerate(files)})[1].splitlines() if line.startswith("  test/")]
+        self.assertEqual(len(listed), 10)  # the ten that grew most
+        repo5 = Repo(self)
+        self.gate(repo5, files={"test/a.test.ts": [40], "test/b.test.ts": [10**6]})
+        out = self.gate(repo5, files={"test/a.test.ts": [90], "test/b.test.ts": [10**6]})[1]
+        self.assertNotIn("WARNING", out)  # 2.25 times, but under a hundred milliseconds is noise
+        out = self.gate(repo5, files={"test/a.test.ts": [210], "test/b.test.ts": [10**6]})[1]
+        self.assertIn("WARNING: test/a.test.ts grew", out)  # 2.33 times and over a hundred
+        for now, warns in ((2000, False), (2001, True)):  # double is not more than double
+            repo3 = Repo(self)
+            self.gate(repo3, files={"test/a.test.ts": [1000], "test/b.test.ts": [10**6]})
+            self.assertEqual("WARNING: test/a.test.ts grew" in self.gate(repo3, files={"test/a.test.ts": [now], "test/b.test.ts": [10**6]})[1], warns)
+
+    # --- what it refuses ----------------------------------------------------
+
+    def test_a_report_that_is_not_a_report_is_refused_and_records_nothing(self):
+        repo = Repo(self)
+        for text in ("{ not json", json.dumps({"results": []}), ""):
+            with self.subTest(text=text):
+                repo.write(self.REPORT, text)
+                self.expect(self.gate(repo), 2, f"{self.REPORT} is not a Jest-shaped JSON report")
+        self.assertFalse(os.path.exists(os.path.join(repo.root, self.HISTORY)))
+
+    def test_a_missing_report_is_refused(self):
+        repo = Repo(self)
+        self.expect(self.gate(repo), 2, f"{self.REPORT} is not a Jest-shaped JSON report")
+
+    def test_a_report_with_no_tests_is_refused_rather_than_recorded_as_free(self):
+        repo = Repo(self)
+        self.report(repo, {})
+        self.expect(self.gate(repo), 2, "has no tests")
+        self.assertFalse(os.path.exists(os.path.join(repo.root, self.HISTORY)))
+
+    def test_missing_or_unknown_options_are_a_usage_error(self):
+        repo = Repo(self)
+        self.report(repo, {"test/a.test.ts": [5]})
+        for args in (["perf-gate"], ["perf-gate", "--report", self.REPORT], ["perf-gate", "--history", self.HISTORY], ["perf-gate", "--report", self.REPORT, "--history", self.HISTORY, "--loud"], ["perf-gate", "--rep", self.REPORT, "--history", self.HISTORY]):
+            with self.subTest(args=args):
+                code, out = repo.run(*args)
+                self.assertEqual(code, 2, out)
+                self.assertIn("usage: guardrail perf-gate", out)
+
+    def test_a_damaged_line_of_the_history_is_skipped_with_a_note(self):
+        perf = self.perf()
+        repo = Repo(self)
+        self.gate(repo, files={"test/a.test.ts": [1000]})
+        (good,) = self.history(repo)
+        lines = ["{ damaged", "", "[1]"] + [json.dumps({key: value for key, value in good.items() if key != missing}) for missing in ("label", "tests", "totalMs", "files")]
+        with open(os.path.join(repo.root, self.HISTORY), "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        code, out = self.gate(repo, files={"test/a.test.ts": [1000 * 3]})
+        self.assertEqual(code, 0, out)
+        for number in (2, 4, 5, 6, 7, 8):  # every damaged line, and the blank one (3) is no record and no note
+            self.assertIn(f"{self.HISTORY}:{number}: not a record of this tool, skipped", out)
+        self.assertNotIn(f"{self.HISTORY}:3:", out)
+        self.assertIn("WARNING: the total duration grew", out)  # compared with the last good line
+
+
+def repo_head(repo):
+    """The short commit id the scenario's repository is at."""
+    return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo.root, capture_output=True, text=True, env=CLEAN_ENV).stdout.strip()
+
+
 class Wiring(Scenario):
     def test_selfcheck_bites_when_hooks_are_not_installed(self):
         repo = Repo(self)

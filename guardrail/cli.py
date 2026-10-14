@@ -5,12 +5,17 @@ Exit codes: 0 pass, 1 blocked, 2 unknown command or the lock could not look.
 
 from __future__ import annotations
 
+import argparse
+import datetime
 import os
 import sys
 
-from . import core, locks
+from . import core, locks, perf
 
-USAGE = "usage: guardrail selfcheck | staged | perturb | commit-gate <message file> | citations"
+USAGE = (
+    "usage: guardrail selfcheck | staged | perturb | commit-gate <message file> | citations"
+    " | perf-gate --report <file> --history <file> [--label <name>] [--strict]"
+)
 
 
 def _report(name: str, problems: list[str], notes: list[str] | None = None) -> int:
@@ -22,6 +27,32 @@ def _report(name: str, problems: list[str], notes: list[str] | None = None) -> i
     return 1 if problems else 0
 
 
+def _perf_gate(args: list[str]) -> int:
+    """Record the full suite's timing and compare it with the last run of its label."""
+    parser = argparse.ArgumentParser(prog="guardrail perf-gate", allow_abbrev=False)
+    parser.add_argument("--report", required=True, help="Jest-shaped JSON report of a full run")
+    parser.add_argument("--history", required=True, help="JSON-lines file the run is appended to")
+    parser.add_argument("--label", default=perf.DEFAULT_LABEL, help="runs with the same label are compared")
+    parser.add_argument("--strict", action="store_true", help="a warning is an exit code 1")
+    try:
+        options = parser.parse_args(args)
+    except SystemExit as stop:  # argparse exits on a usage error (2) and on --help (0)
+        return stop.code if isinstance(stop.code, int) else 2
+    cwd = os.getcwd()
+    root = core.git(cwd, "rev-parse", "--show-toplevel", check=False).strip() or cwd  # a repository is optional
+    commit = core.git(root, "rev-parse", "--short", "HEAD", check=False).strip() or None
+    date = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    entry = perf.summarise(root, options.report, options.label, commit, date)
+    history, notes = perf.read_history(options.history)
+    warnings, lines = perf.compare(entry, perf.previous_run(history, options.label))
+    perf.append(options.history, entry)  # always: a run that warns is still a run
+    for note in notes:
+        print(f"guardrail perf-gate: note: {note}", file=sys.stderr)
+    for line in lines + warnings:
+        print(line, file=sys.stderr)
+    return 1 if warnings and options.strict else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
@@ -29,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     command, rest = args[0], args[1:]
     try:
+        if command == "perf-gate":  # needs no configuration and no repository
+            return _perf_gate(rest)
         root = core.repo_root()
         config = core.Config.load(root)
 

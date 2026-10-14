@@ -170,3 +170,18 @@ def hatch_lines(message: str, key: str) -> list[str]:
 def hatch(message: str, key: str, min_reason: int = MIN_REASON) -> bool:
     """True when the commit message has a line `key: <reason>` with a real reason."""
     return any(len(body) >= min_reason for body in hatch_lines(message, key))
+
+
+def format_ms(value: float) -> str:
+    """A duration for a person: whole milliseconds without a decimal point."""
+    return str(int(value)) if value == int(value) else f"{value:.1f}"
+
+
+def repo_path(root: str, name) -> str:
+    """The path of a file named by a test runner's report, relative to the repository (a runner
+    writes absolute ones). Anything that is not a string names no file: an empty path."""
+    if not isinstance(name, str):
+        return ""
+    if os.path.isabs(name):
+        name = os.path.relpath(os.path.realpath(name), os.path.realpath(root))
+    return name.replace(os.sep, "/")

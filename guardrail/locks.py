@@ -651,20 +651,6 @@ def _time_budget(config: core.Config):
     return raw["report"], budget
 
 
-def _ms(value: float) -> str:
-    """A duration for a person: whole milliseconds without a decimal point."""
-    return str(int(value)) if value == int(value) else f"{value:.1f}"
-
-
-def _repo_path(root: str, name) -> str:
-    """The path of a report's test file relative to the repository (a runner writes absolute ones)."""
-    if not isinstance(name, str):
-        return ""
-    if os.path.isabs(name):
-        name = os.path.relpath(os.path.realpath(name), os.path.realpath(root))
-    return name.replace(os.sep, "/")
-
-
 def _judge_slow_test_line(body: str, slow: list[_Slow]):
     """Judge one `slow-test: <name> | <duration> | <reason>` line against what is over budget.
     Returns (the item it excuses or None, problems). Its content is checked, not only its
@@ -689,7 +675,7 @@ def _judge_slow_test_line(body: str, slow: list[_Slow]):
     item = found[0]
     stated_ms = round(float(stated.group(1)) * (1000 if stated.group(2) == "s" else 1), 3)
     if stated_ms <= item.limit:
-        return None, [f'slow-test: "{name}" states {_ms(stated_ms)} ms, which is not over the {item.limit} ms budget it is excused from']
+        return None, [f'slow-test: "{name}" states {core.format_ms(stated_ms)} ms, which is not over the {item.limit} ms budget it is excused from']
     return item, []
 
 
@@ -716,7 +702,7 @@ def time_budget(root: str, config: core.Config, message: str) -> tuple[list[str]
         return [f"{report} is not a Jest-shaped JSON report, so the time budget cannot be checked"], []
     in_report: dict[str, list[Outcome]] = {}
     for outcome in outcomes:
-        in_report.setdefault(_repo_path(root, outcome.file), []).append(outcome)
+        in_report.setdefault(core.repo_path(root, outcome.file), []).append(outcome)
     notes, slow = [], []
     for path in staged:
         tests = in_report.get(path)
@@ -744,11 +730,11 @@ def time_budget(root: str, config: core.Config, message: str) -> tuple[list[str]
     for item in slow:
         if item in excused:
             continue
-        hatch = f"`slow-test: {item.name} | <measured duration, e.g. {_ms(item.ms)}ms> | <why it has to be this slow>`"
+        hatch = f"`slow-test: {item.name} | <measured duration, e.g. {core.format_ms(item.ms)}ms> | <why it has to be this slow>`"
         if item.kind == "test":
-            problems.append(f'{item.path}: "{item.name}" took {_ms(item.ms)} ms, over the {item.limit} ms budget for one test. Make it faster, or add a line {hatch} to the commit message.')
+            problems.append(f'{item.path}: "{item.name}" took {core.format_ms(item.ms)} ms, over the {item.limit} ms budget for one test. Make it faster, or add a line {hatch} to the commit message.')
         else:
-            problems.append(f"{item.path}: its tests add up to {_ms(item.ms)} ms, over the {item.limit} ms budget for one file. Split it or make it faster, or add a line {hatch} to the commit message.")
+            problems.append(f"{item.path}: its tests add up to {core.format_ms(item.ms)} ms, over the {item.limit} ms budget for one file. Split it or make it faster, or add a line {hatch} to the commit message.")
     return problems, notes
 
 

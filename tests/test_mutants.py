@@ -8,8 +8,10 @@ The run works on a snapshot of the repository taken when it starts, so the code 
 edited while it goes. A mutant stops at the first scenario that fails (that is a kill).
 GUARDRAIL_MUTANTS=<text> runs only the mutants whose label or file contains the text
 (comma-separated for several); it is for the work in progress, never for a release.
+GUARDRAIL_MUTANT_WORKERS (default 3) is how many mutants run at once.
 """
 
+import concurrent.futures
 import os
 import shutil
 import subprocess
@@ -88,7 +90,7 @@ MUTANTS = [
     ("guardrail/locks.py", "if set(raw) - _TIME_BUDGET_KEYS:", "if False:", "a misspelled time budget key is ignored"),
     ("guardrail/locks.py", "or value <= 0:", "or value < 0:", "a time budget of zero is accepted"),
     ("guardrail/locks.py", "TIME_BUDGET_DEFAULTS = {\"testMs\": 5000, \"fileMs\": 20000}", "TIME_BUDGET_DEFAULTS = {\"testMs\": 5001, \"fileMs\": 20001}", "the default time budget changed"),
-    ("guardrail/locks.py", "if os.path.isabs(name):", "if False:", "an absolute path of the report is not read relative to the repository"),
+    ("guardrail/core.py", "if os.path.isabs(name):", "if False:", "an absolute path of the report is not read relative to the repository"),
     ("guardrail/locks.py", "exact = [item for item in slow if name in (item.name, item.label)]", "exact = []", "a full name does not win over a longer name that contains it"),
     ("guardrail/locks.py", "    if len(found) > 1:\n", "    if False:\n", "a slow-test name that matches two tests excuses the first"),
     ("guardrail/locks.py", "    if not found:\n        return None, [f'slow-test:", "    if False:\n        return None, [f'slow-test:", "a stale slow-test line is accepted"),
@@ -101,10 +103,45 @@ MUTANTS = [
     ("guardrail/locks.py", "if len(fields) != 3 or not fields[0]:", "if not fields[0]:", "a slow-test line that is not in three parts is read"),
     ("guardrail/locks.py", "        if item in excused:\n            continue\n", "        if False:\n            continue\n", "a slow-test line excuses nothing"),
     ("guardrail/locks.py", "    return problems + found, notes\n", "    return problems, notes\n", "the time budget problems are dropped from the commit gate"),
-    ("guardrail/locks.py", "return str(int(value)) if value == int(value) else f\"{value:.1f}\"", "return str(int(value))", "a fraction of a millisecond is cut"),
+    ("guardrail/core.py", "return str(int(value)) if value == int(value) else f\"{value:.1f}\"", "return str(int(value))", "a fraction of a millisecond is cut"),
     ("guardrail/locks.py", "\" \".join([*test.get(\"ancestorTitles\", []), test.get(\"title\", \"\")]).strip()", "test.get(\"title\", \"\")", "a test without a full name loses its ancestors"),
     ("guardrail/cli.py", "problems, notes = locks.commit_gate(root, config, message)", "problems, notes = [p for lock in locks.COMMIT_GATE for p in lock(root, config, message)], []", "the commit gate does not run the time budget"),
     ("guardrail/cli.py", "locks.commit_gate(root, config, message)\n            return _report(command, problems, notes)", "locks.commit_gate(root, config, message)\n            return _report(command, problems)", "the notes of the commit gate are not shown"),
+    # --- the push suite's timing record ---
+    ("guardrail/perf.py", "if before and now > before * (1 + TOTAL_GROWTH):", "if before and now >= before * (1 + TOTAL_GROWTH):", "a total exactly at the threshold warns"),
+    ("guardrail/perf.py", "TOTAL_GROWTH = 0.10", "TOTAL_GROWTH = 0.20", "the total threshold changed"),
+    ("guardrail/perf.py", "FILE_FACTOR = 2.0", "FILE_FACTOR = 3.0", "the file factor changed"),
+    ("guardrail/perf.py", "FILE_FLOOR_MS = 100", "FILE_FLOOR_MS = 500", "the file floor changed upwards"),
+    ("guardrail/perf.py", "FILE_FLOOR_MS = 100", "FILE_FLOOR_MS = 50", "the file floor changed downwards"),
+    ("guardrail/perf.py", "TOP_FILES = 10", "TOP_FILES = 9", "the table shows fewer files"),
+    ("guardrail/perf.py", "ms > old * FILE_FACTOR:", "ms >= old * FILE_FACTOR:", "a file exactly at the factor warns"),
+    ("guardrail/perf.py", "and ms > FILE_FLOOR_MS and", "and", "a file below the floor warns"),
+    ("guardrail/perf.py", "and ms > FILE_FLOOR_MS and", "and ms >= FILE_FLOOR_MS and", "a file exactly at the floor warns"),
+    ("guardrail/perf.py", "if old > 0 and", "if", "a file that was free before has a ratio"),
+    ("guardrail/perf.py", "grown.sort(key=lambda row: (-row[0], row[1]))", "grown.sort(key=lambda row: (row[0], row[1]))", "the table lists the smallest growth first"),
+    ("guardrail/perf.py", "for growth, path, old, ms in grown[:TOP_FILES]:", "for growth, path, old, ms in grown:", "the table lists every file"),
+    ("guardrail/perf.py", "        if ms > old:\n", "        if ms >= old:\n", "a file that did not change is listed as grown"),
+    ("guardrail/perf.py", "for record in reversed(history):", "for record in history:", "the first run of a label is the one compared with"),
+    ("guardrail/perf.py", "if record[\"label\"] == label:", "if True:", "a run is compared with a run of another label"),
+    ("guardrail/perf.py", "isinstance(value, dict)\n        and ", "", "a line that is not an object is read as a record"),
+    ("guardrail/perf.py", "and isinstance(value.get(\"label\"), str)\n", "\n", "a record without a label is accepted"),
+    ("guardrail/perf.py", "and isinstance(value.get(\"tests\"), int)\n", "\n", "a record without a test count is accepted"),
+    ("guardrail/perf.py", "and isinstance(value.get(\"totalMs\"), (int, float))\n", "\n", "a record without a total is accepted"),
+    ("guardrail/perf.py", "and isinstance(value.get(\"files\"), dict)\n", "\n", "a record without its files is accepted"),
+    ("guardrail/perf.py", "            if not line.strip():\n                continue\n", "", "a blank line of the history is a damaged record"),
+    ("guardrail/perf.py", "    if not outcomes:\n", "    if False:\n", "a report with no tests is recorded as a free run"),
+    ("guardrail/perf.py", "(outcome.duration or 0.0)", "outcome.duration", "a test without a duration stops the record"),
+    ("guardrail/perf.py", "\"tests\": len(outcomes)", "\"tests\": len(files)", "tests are counted as files"),
+    ("guardrail/cli.py", "return 1 if warnings and options.strict else 0", "return 1 if warnings else 0", "a warning fails without --strict"),
+    ("guardrail/cli.py", "return 1 if warnings and options.strict else 0", "return 1 if options.strict else 0", "--strict fails without a warning"),
+    ("guardrail/cli.py", "    perf.append(options.history, entry)  # always: a run that warns is still a run\n", "", "the run is not recorded"),
+    ("guardrail/cli.py", "    warnings, lines = perf.compare(entry, perf.previous_run(history, options.label))\n    perf.append(", "    perf.append(options.history, entry)\n    history, notes = perf.read_history(options.history)\n    warnings, lines = perf.compare(entry, perf.previous_run(history, options.label))\n    perf.append(", "the run is compared with itself"),
+    ("guardrail/cli.py", "commit = core.git(root, \"rev-parse\", \"--short\", \"HEAD\", check=False).strip() or None", "commit = core.git(root, \"rev-parse\", \"--short\", \"HEAD\", check=False).strip()", "a missing commit is an empty string"),
+    ("guardrail/cli.py", "allow_abbrev=False", "allow_abbrev=True", "an abbreviated option is accepted"),
+    ("guardrail/cli.py", "parser.add_argument(\"--report\", required=True,", "parser.add_argument(\"--report\", required=False,", "perf-gate runs without a report"),
+    ("guardrail/cli.py", "parser.add_argument(\"--history\", required=True,", "parser.add_argument(\"--history\", required=False,", "perf-gate runs without a history"),
+    ("guardrail/cli.py", "return stop.code if isinstance(stop.code, int) else 2", "return 0", "a usage error exits zero"),
+    ("guardrail/perf.py", "DEFAULT_LABEL = \"default\"", "DEFAULT_LABEL = \"\"", "the default label is empty"),
 ]
 
 
@@ -125,30 +162,40 @@ class LocksAreGuarded(unittest.TestCase):
         self.assertEqual(survivors, [], "the scenarios stayed green with these locks broken")
 
     def run_mutants(self, snapshot, survivors, not_applied):
-        for file, original, replacement, label in selected(MUTANTS):
-            with tempfile.TemporaryDirectory() as tmp:
-                for name in ("guardrail", "bin"):
-                    shutil.copytree(os.path.join(snapshot, name), os.path.join(tmp, name))
-                target = os.path.join(tmp, file)
-                with open(target, encoding="utf-8") as handle:
-                    source = handle.read()
-                if source.count(original) != 1:
-                    not_applied.append(f"{label} (found {source.count(original)} times)")
-                    print(f"NOT APPLIED {file}: {label}", file=sys.stderr, flush=True)
-                    continue
-                with open(target, "w", encoding="utf-8") as handle:
-                    handle.write(source.replace(original, replacement))
-                result = subprocess.run(
-                    [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_scenarios"],
-                    cwd=snapshot,
-                    env={**os.environ, "GUARDRAIL_HOME": tmp},
-                    capture_output=True,
-                )
-                killed = result.returncode != 0
-                # One line per mutant, so the log of a run says which lock each one broke.
-                print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}", file=sys.stderr, flush=True)
-                if not killed:
+        # Mutants are independent (each has its own copy of the code and the scenarios build their own
+        # repositories), so a few run at once. GUARDRAIL_MUTANT_WORKERS=1 runs them one by one.
+        workers = int(os.environ.get("GUARDRAIL_MUTANT_WORKERS", "3"))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for label, outcome in pool.map(lambda m: self.run_mutant(snapshot, m), selected(MUTANTS)):
+                if outcome == "survived":
                     survivors.append(label)
+                elif outcome == "not applied":
+                    not_applied.append(label)
+
+    def run_mutant(self, snapshot, mutant):
+        """Break the code in a copy, run the scenarios on it. Returns (label, killed | survived | not applied)."""
+        file, original, replacement, label = mutant
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("guardrail", "bin"):
+                shutil.copytree(os.path.join(snapshot, name), os.path.join(tmp, name))
+            target = os.path.join(tmp, file)
+            with open(target, encoding="utf-8") as handle:
+                source = handle.read()
+            if source.count(original) != 1:
+                print(f"NOT APPLIED {file}: {label}", file=sys.stderr, flush=True)
+                return f"{label} (found {source.count(original)} times)", "not applied"
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(source.replace(original, replacement))
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_scenarios"],
+                cwd=snapshot,
+                env={**os.environ, "GUARDRAIL_HOME": tmp},
+                capture_output=True,
+            )
+            killed = result.returncode != 0
+            # One line per mutant, so the log of a run says which lock each one broke.
+            print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}", file=sys.stderr, flush=True)
+            return label, "killed" if killed else "survived"
 
 
 if __name__ == "__main__":
