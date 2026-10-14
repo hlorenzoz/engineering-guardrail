@@ -3,6 +3,11 @@
 A scenario suite that stays green when a lock is broken is not guarding that lock.
 Each mutant replaces one literal that must occur EXACTLY once in its file; a
 mutant that cannot be applied is a failure, because it proves nothing.
+
+The run works on a snapshot of the repository taken when it starts, so the code can be
+edited while it goes. A mutant stops at the first scenario that fails (that is a kill).
+GUARDRAIL_MUTANTS=<text> runs only the mutants whose label or file contains the text
+(comma-separated for several); it is for the work in progress, never for a release.
 """
 
 import os
@@ -70,13 +75,27 @@ MUTANTS = [
 ]
 
 
+def selected(mutants):
+    """The mutants to run: all of them, or those matching GUARDRAIL_MUTANTS."""
+    wanted = [text for text in os.environ.get("GUARDRAIL_MUTANTS", "").split(",") if text]
+    return [m for m in mutants if not wanted or any(text in m[3] or text in m[0] for text in wanted)]
+
+
 class LocksAreGuarded(unittest.TestCase):
     def test_every_mutant_is_killed_by_the_scenarios(self):
         survivors, not_applied = [], []
-        for file, original, replacement, label in MUTANTS:
+        with tempfile.TemporaryDirectory() as snapshot:
+            for name in ("guardrail", "bin", "tests"):
+                shutil.copytree(os.path.join(HERE, name), os.path.join(snapshot, name), ignore=shutil.ignore_patterns("__pycache__", "tests_*.txt"))
+            self.run_mutants(snapshot, survivors, not_applied)
+        self.assertEqual(not_applied, [], "mutants that could not be applied prove nothing")
+        self.assertEqual(survivors, [], "the scenarios stayed green with these locks broken")
+
+    def run_mutants(self, snapshot, survivors, not_applied):
+        for file, original, replacement, label in selected(MUTANTS):
             with tempfile.TemporaryDirectory() as tmp:
                 for name in ("guardrail", "bin"):
-                    shutil.copytree(os.path.join(HERE, name), os.path.join(tmp, name))
+                    shutil.copytree(os.path.join(snapshot, name), os.path.join(tmp, name))
                 target = os.path.join(tmp, file)
                 with open(target, encoding="utf-8") as handle:
                     source = handle.read()
@@ -87,8 +106,8 @@ class LocksAreGuarded(unittest.TestCase):
                 with open(target, "w", encoding="utf-8") as handle:
                     handle.write(source.replace(original, replacement))
                 result = subprocess.run(
-                    [sys.executable, "-m", "unittest", "-q", "tests.test_scenarios"],
-                    cwd=HERE,
+                    [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_scenarios"],
+                    cwd=snapshot,
                     env={**os.environ, "GUARDRAIL_HOME": tmp},
                     capture_output=True,
                 )
@@ -97,8 +116,6 @@ class LocksAreGuarded(unittest.TestCase):
                 print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}", file=sys.stderr, flush=True)
                 if not killed:
                     survivors.append(label)
-        self.assertEqual(not_applied, [], "mutants that could not be applied prove nothing")
-        self.assertEqual(survivors, [], "the scenarios stayed green with these locks broken")
 
 
 if __name__ == "__main__":
