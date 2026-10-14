@@ -15,7 +15,7 @@ install beyond `pre-commit` and `python3`.
 | `guardrail-selfcheck` | commit, first | a hook type is not installed, a guardrail hook is missing from the config, or a built-in canary no longer bites |
 | `guardrail-staged` | commit | a staged test adds a skipped, focused, empty or self-comparing test; a document adds a `path:line` citation that is dead; the switched-on registry is malformed |
 | `guardrail-perturb` | commit | a new assertion stays green after its expected value is replaced with a wrong one |
-| `guardrail-commit-gate` | commit message | production code has no test staged; the commit is over the size cap; a shared figure changes without its cross-view test; something that must be switched on has no registry entry; a staged test is over the time budget (`timeBudget`, off until configured) |
+| `guardrail-commit-gate` | commit message | production code has no test staged; the commit is over the size cap; a shared figure changes without its cross-view test; something that must be switched on has no registry entry; a staged test is over the time budget (`timeBudget`, off until configured); a staged migration adds a foreign key with no index (`fkIndex`, off until configured) |
 
 Only the lines a commit adds are judged, so code written before the guardrail does not
 block new work.
@@ -59,7 +59,8 @@ block new work.
        "timeoutSeconds": 180
      },
      "switchedOn": { "registry": ".agents/SWITCHED_ON.md", "triggers": ["drizzle/*.sql"], "staleDays": 30 },
-     "timeBudget": { "report": "tests/report_related.json", "format": "jest-json", "testMs": 5000, "fileMs": 20000 }
+     "timeBudget": { "report": "tests/report_related.json", "format": "jest-json", "testMs": 5000, "fileMs": 20000 },
+     "fkIndex": { "migrations": ["drizzle/*.sql"], "leadingColumnsIgnored": ["organization_id"] }
    }
    ```
 
@@ -77,6 +78,7 @@ at least ten characters. A mention inside a sentence does not count.
 | `cross-view-na: <why no shared figure changes>` | the cross-view rule |
 | `no-switch-on: <why nothing has to be switched on>` | the switched-on trigger |
 | `slow-test: <test name> \| <measured duration> \| <why it has to be this slow>` | one test (or file) over the time budget; one line per item |
+| `no-index: <table>.<column> \| <why it needs none>` | a foreign key added without an index |
 
 In a test file, `// guardrail: allow-skip <reason>` on the line allows a conditional
 skip, and `// guardrail: no-perturb <reason>` leaves an assertion out of the perturbation.
@@ -259,6 +261,42 @@ Notes appear on stderr, which `pre-commit` shows only when a hook fails. So a pr
 hook never writes the report gets no complaint: check it once by hand
 (`python3 bin/guardrail commit-gate .git/COMMIT_EDITMSG` after a commit that stages a test).
 
+## Every foreign key a migration adds has an index
+
+A foreign key with no index makes each delete or update of the referenced row scan the whole
+referencing table, and each join through it too. Nothing shows while the table is small. The
+lock refuses it when the migration is written. Off until a project writes the block:
+
+```json
+"fkIndex": { "migrations": ["drizzle/*.sql"], "leadingColumnsIgnored": ["organization_id"] }
+```
+
+- `migrations` are the globs of the migration files (it reads these paths itself, whatever
+  `ignore` says for production code). `leadingColumnsIgnored` are columns that may be left out
+  of the index, or sit at its front: a multi-tenant schema whose keys are
+  `(organization_id, client_id)` and whose indexes are often just `(client_id)`.
+- For each **staged** migration, every foreign key it adds must be served by an index of the
+  same table whose leading keys are the key's columns (minus the ignored ones; a key on the
+  ignored column alone needs an index on it), in any order. A primary key or a unique
+  constraint counts, and so does a unique index. A partial index (`WHERE`) and an expression
+  index do not.
+- It replays **all** the migration files in the index (what will be committed), in file-name
+  order, and judges the final state: an index made in an earlier file counts; one a later
+  file dropped (`DROP INDEX`, `DROP CONSTRAINT`, `DROP COLUMN`, `DROP TABLE`) does not; a key
+  dropped later needs no index. Only the keys that a staged file adds are judged: an old
+  unindexed key never blocks new work.
+- Hatch: `no-index: <table>.<column> | <why it needs none>`, one line per key, naming the
+  table and one column of the key; the reason needs ten characters. A line that names no
+  unindexed key of this commit is an error (a stale line, or a typo).
+
+What it reads (regular expressions over the SQL, not a SQL parser, in `guardrail/schema.py`):
+`CREATE TABLE` (column definitions with an inline `REFERENCES`, `PRIMARY KEY` or `UNIQUE`; table
+constraints `FOREIGN KEY`, `PRIMARY KEY`, `UNIQUE`), `ALTER TABLE ... ADD [COLUMN | CONSTRAINT]`,
+`DROP CONSTRAINT`, `DROP COLUMN`, `CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS]`,
+`DROP INDEX`, `ALTER INDEX ... RENAME TO`, `DROP TABLE`. Comments, strings, quoted identifiers
+and dollar-quoted bodies are skipped. Names are compared in lower case, without the schema.
+What it does **not** see is in "Honest limits".
+
 ## The push suite's timing record: `perf-gate`
 
 A command, not a lock: it never blocks a commit. After a full run it records how long the
@@ -305,6 +343,15 @@ not tune how much slower is too slow.
   borderline fails on a busy day). A staged file that `pre-commit` rewrote while restoring
   unstaged changes looks newer than the report and is skipped with a note. A test the
   related run never executes is never timed here; the push suite is its backstop.
+- **`fkIndex` reads SQL with regular expressions.** A foreign key built where text cannot
+  show it is invisible, and nothing is guessed: a `DO $$ ... $$` block or any dynamic SQL
+  (`EXECUTE`), a function body, `ALTER TABLE ... RENAME` and `ALTER TABLE ... RENAME COLUMN`
+  (a renamed table or column keeps its old name in the replay), `ADD CONSTRAINT ... UNIQUE USING
+  INDEX`, inherited or partitioned tables, and a migration tool that does not write SQL files. An
+  index that exists only in the database, applied by hand, is not in the files and so does not
+  count: record it in a migration. A foreign key the lock does not see is not reported, so a
+  quiet lock is "no unindexed key in the forms it reads", not a proof about the schema. Matching
+  an index to a key checks its leading columns, not that its operator class suits the lookup.
 - **`perf-gate` compares durations measured on whatever machine ran the suite.** A busy day
   looks like growth. It is a trend to look at, which is why it warns and why `--strict` is
   opt-in. The history is only as good as the runs that feed it: run it from the same place
