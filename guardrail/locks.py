@@ -348,7 +348,9 @@ def _run(command: str, path: str, root: str, timeout: int) -> int:
 # goes through the one-by-one check, so the batch never produces a problem and never
 # hides one it cannot see.
 
-_BATCH_FORMATS = ("jest-json",)
+# The shapes of test report the guardrail can read, for perturbation in batch and for the
+# time budget alike.
+REPORT_FORMATS = ("jest-json",)
 # Sentinels are 988654003, 989654006, ... A matcher such as toBeCloseTo prints the
 # DIFFERENCE between the received and the expected value; with sentinels one apart, a
 # small received value would print another assertion's sentinel. A stride of a million
@@ -361,10 +363,10 @@ def _batch_of(runner: dict):
     batch = runner.get("batch")
     if batch is None:
         return None
-    if not isinstance(batch, dict) or batch.get("format") not in _BATCH_FORMATS or not isinstance(batch.get("args"), str):
+    if not isinstance(batch, dict) or batch.get("format") not in REPORT_FORMATS or not isinstance(batch.get("args"), str):
         raise core.GuardrailError(
             "perturb.runners batch must be an object with \"args\" (a string) and \"format\" (one of "
-            + ", ".join(_BATCH_FORMATS) + ")"
+            + ", ".join(REPORT_FORMATS) + ")"
         )
     if not isinstance(batch.get("baselineArgs", ""), str):
         raise core.GuardrailError("perturb.runners batch.baselineArgs must be a string")
@@ -395,26 +397,48 @@ def batch_sentinels(sites: list[_Site], text: str) -> list[tuple[str, str]]:
     return marks
 
 
-def _failed_messages(report_path: str) -> list[str] | None:
-    """The failure messages of the FAILED tests in a Jest-shaped JSON report
-    (`testResults[].assertionResults[]` with `status` and `failureMessages`), which is
-    also what Vitest's `json` reporter writes. None when the report is missing,
-    unreadable or not of that shape: a report that cannot be read proves nothing."""
+class Outcome(NamedTuple):
+    """One test of a Jest-shaped report: where it ran, its full name, how it ended, the
+    messages of its failure and how long it took in milliseconds (None when the report has none)."""
+
+    file: str
+    name: str
+    status: str
+    messages: list
+    duration: float | None
+
+
+def read_jest_report(report_path: str) -> list[Outcome] | None:
+    """The tests of a Jest-shaped JSON report (`testResults[].assertionResults[]` with
+    `status` and `failureMessages`), which is also what Vitest's `json` reporter writes.
+    The ONE reader of that format: perturbation reads failures from it, the time budget and
+    the timing record read durations. None when the report is missing, unreadable or not of
+    that shape: a report that cannot be read proves nothing."""
     try:
         with open(report_path, encoding="utf-8") as handle:
             document = json.load(handle)
-        messages = []
+        outcomes = []
         for file_result in document["testResults"]:
             for test in file_result["assertionResults"]:
                 if not isinstance(test["status"], str) or not isinstance(test["failureMessages"], list):
                     return None
                 if not all(isinstance(m, str) for m in test["failureMessages"]):
                     return None
-                if test["status"] == "failed":
-                    messages += test["failureMessages"]
-        return messages
-    except (OSError, ValueError, KeyError, TypeError):
+                duration = test.get("duration")
+                duration = float(duration) if isinstance(duration, (int, float)) and not isinstance(duration, bool) else None
+                title = test.get("fullName") or " ".join([*test.get("ancestorTitles", []), test.get("title", "")]).strip()
+                outcomes.append(Outcome(file_result.get("name"), title, test["status"], test["failureMessages"], duration))
+        return outcomes
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
+
+
+def _failed_messages(report_path: str) -> list[str] | None:
+    """The failure messages of the FAILED tests in a report; None when it cannot be read."""
+    outcomes = read_jest_report(report_path)
+    if outcomes is None:
+        return None
+    return [message for outcome in outcomes if outcome.status == "failed" for message in outcome.messages]
 
 
 def _mentions(messages: list[str], token: str) -> bool:
@@ -581,6 +605,160 @@ def perturb_expected(root: str, config: core.Config) -> tuple[list[str], list[st
     return problems, notes
 
 
+# --- time budget for new or changed tests ----------------------------------
+#
+# The related-tests hook of a project runs, in the same commit, the tests related to the staged
+# files, and can write a Jest-shaped report beside its normal output. This lock reads the
+# durations in that report and refuses a staged test file with a test, or a total, over the
+# project's budget: a slow test is caught when it is written, not months later when the suite
+# takes minutes. It judges only what it can see (README, "Honest limits").
+
+SLOW_TEST = "slow-test"
+TIME_BUDGET_DEFAULTS = {"testMs": 5000, "fileMs": 20000}
+_TIME_BUDGET_KEYS = {"report", "format", *TIME_BUDGET_DEFAULTS}
+_DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(ms|s)$")
+
+
+class _Slow(NamedTuple):
+    """Something over budget: a test (kind "test") or a whole staged file (kind "file")."""
+
+    kind: str
+    path: str
+    name: str
+    ms: float
+    limit: int
+
+    @property
+    def label(self) -> str:
+        return self.path if self.kind == "file" else f"{self.path} > {self.name}"
+
+
+def _time_budget(config: core.Config):
+    """The validated `timeBudget` block as (report path, {testMs, fileMs}); None when off."""
+    raw = config["timeBudget"]
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("report"), str) or not raw["report"]:
+        raise core.GuardrailError('timeBudget must be an object with "report", the file the related-tests hook writes its report to')
+    if raw.get("format") not in REPORT_FORMATS:
+        raise core.GuardrailError("timeBudget.format must be one of " + ", ".join(REPORT_FORMATS))
+    if set(raw) - _TIME_BUDGET_KEYS:
+        raise core.GuardrailError("timeBudget has unknown key(s): " + ", ".join(sorted(set(raw) - _TIME_BUDGET_KEYS)))
+    budget = {**TIME_BUDGET_DEFAULTS, **{key: raw[key] for key in TIME_BUDGET_DEFAULTS if key in raw}}
+    for key, value in budget.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise core.GuardrailError(f"timeBudget.{key} must be a whole number of milliseconds above zero")
+    return raw["report"], budget
+
+
+def _ms(value: float) -> str:
+    """A duration for a person: whole milliseconds without a decimal point."""
+    return str(int(value)) if value == int(value) else f"{value:.1f}"
+
+
+def _repo_path(root: str, name) -> str:
+    """The path of a report's test file relative to the repository (a runner writes absolute ones)."""
+    if not isinstance(name, str):
+        return ""
+    if os.path.isabs(name):
+        name = os.path.relpath(os.path.realpath(name), os.path.realpath(root))
+    return name.replace(os.sep, "/")
+
+
+def _judge_slow_test_line(body: str, slow: list[_Slow]):
+    """Judge one `slow-test: <name> | <duration> | <reason>` line against what is over budget.
+    Returns (the item it excuses or None, problems). Its content is checked, not only its
+    presence: the name must single out one item over budget, the duration must be written the
+    way the report measures it and exceed that item's limit, and the reason must say something."""
+    fields = [field.strip() for field in body.split("|", 2)]
+    shown = f'"slow-test: {body}"'
+    if len(fields) != 3 or not fields[0]:
+        return None, [f'slow-test: expected "<test name> | <measured duration, e.g. 1400ms or 1.4s> | <reason>", got {shown}']
+    name, duration, reason = fields
+    stated = _DURATION.match(duration)
+    if not stated:
+        return None, [f"slow-test: a measured duration is missing in {shown}. Write it as 1400ms or 1.4s, the way the report measured it."]
+    if len(reason) < core.MIN_REASON:
+        return None, [f"slow-test: a reason of at least {core.MIN_REASON} characters is missing in {shown}"]
+    exact = [item for item in slow if name in (item.name, item.label)]
+    found = exact or [item for item in slow if name in item.label]
+    if not found:
+        return None, [f'slow-test: "{name}" names no test over budget (a stale line, or a typo)']
+    if len(found) > 1:
+        return None, [f'slow-test: "{name}" matches {len(found)} tests over budget ({", ".join(i.label for i in found)}); name one of them in full']
+    item = found[0]
+    stated_ms = round(float(stated.group(1)) * (1000 if stated.group(2) == "s" else 1), 3)
+    if stated_ms <= item.limit:
+        return None, [f'slow-test: "{name}" states {_ms(stated_ms)} ms, which is not over the {item.limit} ms budget it is excused from']
+    return item, []
+
+
+def time_budget(root: str, config: core.Config, message: str) -> tuple[list[str], list[str]]:
+    """A staged test file with a slow test, or a slow total, is refused. Returns (problems, notes).
+
+    Only the tests of STAGED test files are judged, with the durations the related-tests hook
+    wrote during this same commit. What it cannot see is a note, never a pass in silence and
+    never a failure: a missing report, a report older than the staged file, a staged file the
+    report does not have (an end-to-end suite the related run never executes). A report that
+    exists and is not a report cannot be looked at, and that is a problem."""
+    settings = _time_budget(config)
+    staged = [p for p in core.staged_files(root) if config.is_test(p)]
+    if settings is None or not staged:
+        return [], []
+    report, budget = settings
+    report_path = os.path.join(root, report)
+    try:
+        written = os.path.getmtime(report_path)
+    except OSError:
+        return [], [f"{report} does not exist: the time budget was not checked (the related-tests hook writes it)"]
+    outcomes = read_jest_report(report_path)
+    if outcomes is None:
+        return [f"{report} is not a Jest-shaped JSON report, so the time budget cannot be checked"], []
+    in_report: dict[str, list[Outcome]] = {}
+    for outcome in outcomes:
+        in_report.setdefault(_repo_path(root, outcome.file), []).append(outcome)
+    notes, slow = [], []
+    for path in staged:
+        tests = in_report.get(path)
+        if tests is None:
+            notes.append(f"{path}: not in {report}, so its time was not checked (a suite the related run does not execute, say)")
+            continue
+        try:
+            changed = os.path.getmtime(os.path.join(root, path))
+        except OSError:
+            changed = None
+        if changed is None or changed > written:
+            notes.append(f"{path}: changed after {report} was written, so its time was not checked")
+            continue
+        for test in tests:
+            if (test.duration or 0) > budget["testMs"]:
+                slow.append(_Slow("test", path, test.name, test.duration, budget["testMs"]))
+        total = sum(test.duration or 0 for test in tests)
+        if total > budget["fileMs"]:
+            slow.append(_Slow("file", path, path, total, budget["fileMs"]))
+    problems, excused = [], []
+    for body in core.hatch_lines(message, SLOW_TEST):
+        item, found = _judge_slow_test_line(body, slow)
+        problems += found
+        excused.append(item)
+    for item in slow:
+        if item in excused:
+            continue
+        hatch = f"`slow-test: {item.name} | <measured duration, e.g. {_ms(item.ms)}ms> | <why it has to be this slow>`"
+        if item.kind == "test":
+            problems.append(f'{item.path}: "{item.name}" took {_ms(item.ms)} ms, over the {item.limit} ms budget for one test. Make it faster, or add a line {hatch} to the commit message.')
+        else:
+            problems.append(f"{item.path}: its tests add up to {_ms(item.ms)} ms, over the {item.limit} ms budget for one file. Split it or make it faster, or add a line {hatch} to the commit message.")
+    return problems, notes
+
+
+def commit_gate(root: str, config: core.Config, message: str) -> tuple[list[str], list[str]]:
+    """Every lock that reads the commit message. Returns (problems, notes)."""
+    problems = [p for lock in COMMIT_GATE for p in lock(root, config, message)]
+    found, notes = time_budget(root, config, message)
+    return problems + found, notes
+
+
 # --- self-check ------------------------------------------------------------
 
 HOOK_IDS = ["guardrail-selfcheck", "guardrail-staged", "guardrail-perturb", "guardrail-commit-gate"]
@@ -603,6 +781,9 @@ def canaries() -> list[str]:
     expect(core.hatch("fix: x\n\nno-test: generated file only", "no-test"), "hatch with a reason must open")
     expect(not core.hatch("fix: mentions no-test: here", "no-test"), "hatch inside a sentence must stay shut")
     expect(not core.hatch("fix: x\n\nno-test: n/a", "no-test"), "hatch without a reason must stay shut")
+    expect(_judge_slow_test_line("adds | 6200 | talks to the real database", [])[1] != [], "a slow-test line without a unit must bite")
+    slow = [_Slow("test", "test/a.test.ts", "adds", 6200.0, 5000)]
+    expect(_judge_slow_test_line("adds | 6200ms | talks to the real database", slow) == (slow[0], []), "a complete slow-test line must open")
     config = core.Config({"production": ["src/**"]})
     expect(config.is_production("src/a.ts"), "production path must be recognised")
     expect(not config.is_production("src/a.test.ts"), "a test is not production")

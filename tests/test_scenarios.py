@@ -835,6 +835,212 @@ class PerturbBatch(Scenario):
             self.assertEqual([json.loads(line)["git"] for line in handle], [[]] * 4)
 
 
+class TimeBudget(Scenario):
+    """`commit-gate` and the durations the related-tests hook wrote into a Jest-shaped report
+    during this same commit: a new or changed test that is slow refuses the commit."""
+
+    BUDGET = {"report": "tests/report_related.json", "format": "jest-json", "testMs": 1000, "fileMs": 3000}
+    REPORT = "tests/report_related.json"
+    FILE = "test/a.test.ts"
+    HATCH = "slow-test: {name} | {duration} | {reason}\n"
+    REASON = "talks to the real database"
+
+    def repo(self, tests, staged=None, budget=BUDGET, report=True, age=60):
+        """A repository with `tests` ({path: [(full name, ms)]}) in the report and `staged`
+        (default: all of them) staged. `age` is how many seconds newer than the staged files the
+        report is: negative means the report is older than they are."""
+        repo = Repo(self, {**CONFIG, "timeBudget": budget} if budget is not None else CONFIG)
+        for path in tests if staged is None else staged:
+            repo.stage(path, "it('x', () => { expect(f()).toBe(1) })\n")
+        if report:
+            document = {"testResults": [
+                {"name": os.path.join(repo.root, path), "assertionResults": [
+                    {"title": name.split(" > ")[-1], "fullName": name, "status": "passed", "failureMessages": [], "duration": ms}
+                    for name, ms in results]}
+                for path, results in tests.items()]}
+            repo.write(self.REPORT, json.dumps(document))
+            now = time.time()
+            for path in tests:
+                if os.path.exists(os.path.join(repo.root, path)):  # a file of the report that is not staged has none
+                    os.utime(os.path.join(repo.root, path), (now, now))
+            os.utime(os.path.join(repo.root, self.REPORT), (now + age, now + age))
+        return repo
+
+    def hatch(self, name, duration, reason=REASON):
+        return "test: more\n\n" + self.HATCH.format(name=name, duration=duration, reason=reason)
+
+    # --- what bites ---------------------------------------------------------
+
+    def test_bites_on_a_staged_test_over_the_test_budget(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds", 5), ("adds twice", limit + 1)]})
+        outcome = repo.gate("test: more\n")
+        self.expect(outcome, 1, f'{self.FILE}: "adds twice" took {limit + 1} ms, over the {limit} ms budget for one test')
+        self.assertNotIn('"adds" took', outcome[1])
+        self.assertIn("slow-test:", outcome[1])
+
+    def test_bites_on_a_staged_file_whose_tests_add_up_over_the_file_budget(self):
+        each, limit = self.BUDGET["testMs"], self.BUDGET["fileMs"]
+        count = limit // each + 1
+        repo = self.repo({self.FILE: [(f"case {n}", each) for n in range(count)]})
+        self.expect(repo.gate("test: more\n"), 1, f"{self.FILE}: its tests add up to {each * count} ms, over the {limit} ms budget for one file")
+
+    def test_bites_on_a_hatch_that_names_the_test_but_states_no_duration(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds twice", limit + 1)]})
+        for duration in ("", "slow", "6200", "-5s", "ms"):
+            with self.subTest(duration=duration):
+                outcome = repo.gate(self.hatch("adds twice", duration))
+                self.expect(outcome, 1, "slow-test: a measured duration is missing")
+                self.assertIn('"adds twice" took', outcome[1])  # and the test is still not excused
+
+    # --- what stays quiet ----------------------------------------------------
+
+    def test_stays_quiet_under_the_budget_and_exactly_at_it(self):
+        each, limit = self.BUDGET["testMs"], self.BUDGET["fileMs"]
+        repo = self.repo({self.FILE: [(f"case {n}", each) for n in range(limit // each)]})  # each at its limit, the file at its limit
+        self.expect(repo.gate("test: more\n"), 0)
+
+    def test_stays_quiet_on_a_slow_test_in_a_file_this_commit_does_not_stage(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds", 5)], "test/b.test.ts": [("slow", limit * 10)]}, staged=[self.FILE])
+        self.expect(repo.gate("test: more\n"), 0)
+
+    def test_stays_quiet_when_the_lock_is_not_configured(self):
+        repo = self.repo({self.FILE: [("slow", 10**6)]}, budget=None)
+        self.expect(repo.gate("test: more\n"), 0)
+
+    def test_a_test_without_a_duration_costs_nothing(self):
+        repo = self.repo({self.FILE: [("skipped", None), ("adds", 5)]})
+        self.expect(repo.gate("test: more\n"), 0)
+
+    # --- the hatch -----------------------------------------------------------
+
+    def test_a_hatch_with_the_name_a_duration_and_a_reason_opens_it(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds twice", limit + 400)]})
+        self.expect(repo.gate(self.hatch("adds twice", f"{limit + 400}ms")), 0)
+
+    def test_a_hatch_may_name_a_test_by_a_substring_and_state_seconds(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("pricing > adds twice", limit * 2)]})
+        self.expect(repo.gate(self.hatch("adds tw", f"{limit * 2 / 1000}s")), 0)
+
+    def test_a_substring_that_matches_two_slow_tests_is_not_a_name(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds once", limit + 1), ("adds twice", limit + 1)]})
+        self.expect(repo.gate(self.hatch("adds", f"{limit + 1}ms")), 1, "matches 2 tests over budget")
+
+    def test_a_full_name_wins_over_a_longer_name_that_contains_it(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds", limit + 1), ("adds twice", limit + 1)]})
+        outcome = repo.gate(self.hatch("adds", f"{limit + 1}ms"))
+        self.expect(outcome, 1, '"adds twice" took')  # only the one named is excused
+        self.assertNotIn('"adds" took', outcome[1])
+
+    def test_bites_on_a_hatch_for_a_test_that_is_not_over_budget(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds", 5), ("slow", limit + 1)]})
+        message = self.hatch("slow", f"{limit + 1}ms") + self.HATCH.format(name="adds", duration=f"{limit + 1}ms", reason=self.REASON)
+        self.expect(repo.gate(message), 1, 'slow-test: "adds" names no test over budget')
+
+    def test_bites_on_a_hatch_without_a_real_reason(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("slow", limit + 1)]})
+        self.expect(repo.gate(self.hatch("slow", f"{limit + 1}ms", "n/a")), 1, "slow-test: a reason of at least")
+
+    def test_bites_on_a_hatch_that_states_a_duration_inside_the_budget(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("slow", limit + 1)]})
+        self.expect(repo.gate(self.hatch("slow", f"{limit}ms")), 1, f"states {limit} ms, which is not over the {limit} ms budget")
+
+    def test_bites_on_a_hatch_that_does_not_name_a_test_or_is_not_in_three_parts(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("slow", limit + 1)]})
+        for body in (f" | {limit + 1}ms | {self.REASON}", f"slow {limit + 1}ms {self.REASON}", f"slow | {limit + 1}ms"):
+            with self.subTest(body=body):
+                outcome = repo.gate(f"test: more\n\nslow-test: {body}\n")
+                self.expect(outcome, 1, 'slow-test: expected "<test name> | <measured duration')
+                self.assertIn('"slow" took', outcome[1])
+
+    def test_a_hatch_must_start_the_line(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("slow", limit + 1)]})
+        self.expect(repo.gate("test: more, see " + self.HATCH.format(name="slow", duration=f"{limit + 1}ms", reason=self.REASON)), 1, '"slow" took')
+
+    def test_a_hatch_opens_a_file_over_its_budget_by_the_path(self):
+        each, limit = self.BUDGET["testMs"], self.BUDGET["fileMs"]
+        count = limit // each + 1
+        repo = self.repo({self.FILE: [(f"case {n}", each) for n in range(count)]})
+        self.expect(repo.gate(self.hatch(self.FILE, f"{each * count}ms")), 0)
+
+    def test_a_duration_with_a_fraction_is_shown_with_it(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("slow", limit + 0.5)]})
+        self.expect(repo.gate("test: more\n"), 1, f'"slow" took {limit}.5 ms')
+
+    def test_a_test_is_named_by_its_ancestors_and_title_when_the_report_has_no_full_name(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("pricing adds", limit + 1)]})
+        with open(os.path.join(repo.root, self.REPORT), encoding="utf-8") as handle:
+            document = json.load(handle)
+        for test in document["testResults"][0]["assertionResults"]:
+            del test["fullName"]
+            test.update(title="adds", ancestorTitles=["pricing"])
+        repo.write(self.REPORT, json.dumps(document))
+        os.utime(os.path.join(repo.root, self.REPORT), (time.time() + 60,) * 2)
+        self.expect(repo.gate("test: more\n"), 1, '"pricing adds" took')
+
+    # --- when the report cannot be trusted -----------------------------------
+
+    def test_a_missing_report_is_a_note_not_a_failure(self):
+        repo = self.repo({self.FILE: [("slow", 10**6)]}, report=False)
+        self.expect(repo.gate("test: more\n"), 0, f"{self.REPORT} does not exist")
+
+    def test_a_report_older_than_the_staged_file_is_not_evidence(self):
+        repo = self.repo({self.FILE: [("slow", 10**6)]}, age=-3600)
+        self.expect(repo.gate("test: more\n"), 0, f"{self.FILE}: changed after {self.REPORT} was written")
+
+    def test_a_staged_test_the_report_does_not_have_is_a_note_not_a_failure(self):
+        limit = self.BUDGET["testMs"]
+        repo = self.repo({self.FILE: [("adds", 5)]}, staged=[self.FILE, "e2e/flow.spec.ts"])
+        self.expect(repo.gate("test: more\n"), 0, "e2e/flow.spec.ts: not in tests/report_related.json")
+        slow = self.repo({self.FILE: [("slow", limit + 1)]}, staged=[self.FILE, "e2e/flow.spec.ts"])
+        self.expect(slow.gate("test: more\n"), 1, '"slow" took')  # the one in the report is still judged
+
+    def test_a_report_that_is_not_a_report_cannot_be_looked_at(self):
+        repo = self.repo({self.FILE: [("adds", 5)]})
+        repo.write(self.REPORT, "{ not json")
+        self.expect(repo.gate("test: more\n"), 1, f"{self.REPORT} is not a Jest-shaped JSON report")
+
+    def test_a_commit_that_stages_no_test_is_not_judged_whatever_the_report_is(self):
+        repo = self.repo({self.FILE: [("adds", 5)]}, staged=[])
+        repo.write(self.REPORT, "{ not json")
+        repo.stage("docs/a.md", "text\n")
+        self.expect(repo.gate("docs: a\n\n" + self.HATCH.format(name="gone", duration="9s", reason=self.REASON)), 0)
+
+    # --- defaults and configuration -------------------------------------------
+
+    def test_the_budget_defaults_are_five_seconds_a_test_and_twenty_a_file(self):
+        block = {"report": self.REPORT, "format": "jest-json"}
+        self.expect(self.repo({self.FILE: [("a", 5000)] * 4}, budget=block).gate("test: more\n"), 0)
+        self.expect(self.repo({self.FILE: [("a", 5001)]}, budget=block).gate("test: more\n"), 1, "over the 5000 ms budget for one test")
+        self.expect(self.repo({self.FILE: [("a", 5000)] * 4 + [("b", 1)]}, budget=block).gate("test: more\n"), 1, "over the 20000 ms budget for one file")
+
+    def test_a_budget_that_cannot_be_used_is_an_error_not_a_pass(self):
+        for budget in (
+            {"format": "jest-json"},
+            {"report": self.REPORT, "format": "xml"},
+            {"report": self.REPORT, "format": "jest-json", "testMs": 0},
+            {"report": self.REPORT, "format": "jest-json", "fileMs": "20s"},
+            {"report": self.REPORT, "format": "jest-json", "testMS": 5},
+            "yes",
+        ):
+            with self.subTest(budget=budget):
+                repo = self.repo({self.FILE: [("adds", 5)]}, budget=budget)
+                self.expect(repo.gate("test: more\n"), 2, "cannot look, so it does not pass")
+
+
 class Wiring(Scenario):
     def test_selfcheck_bites_when_hooks_are_not_installed(self):
         repo = Repo(self)

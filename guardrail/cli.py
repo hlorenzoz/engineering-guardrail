@@ -60,8 +60,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             with open(rest[0], encoding="utf-8") as handle:
                 message = handle.read()
-            problems = [p for lock in locks.COMMIT_GATE for p in lock(root, config, message)]
-            return _report(command, problems)
+            problems, notes = locks.commit_gate(root, config, message)
+            return _report(command, problems, notes)
     except core.GuardrailError as error:
         print(f"guardrail {command}: cannot look, so it does not pass: {error}", file=sys.stderr)
         return 2

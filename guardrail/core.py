@@ -26,6 +26,8 @@ DEFAULTS = {
     "perturb": {"runners": [], "max": 12, "timeoutSeconds": 180},
     "citations": {"files": ["**/*.md"]},
     "switchedOn": {"registry": ".agents/SWITCHED_ON.md", "triggers": [], "staleDays": 30},
+    # None switches a lock off: it runs only for a project that writes the block.
+    "timeBudget": None,
 }
 
 
@@ -152,13 +154,19 @@ def staged_added_lines(root: str, path: str) -> set[int]:
     return numbers
 
 
-def hatch(message: str, key: str, min_reason: int = 10) -> bool:
-    """True when the commit message has a line `key: <reason>` with a real reason.
+MIN_REASON = 10
 
-    The line must START with the key (exact line prefix, not a mention inside a
-    sentence) and the reason must be long enough to say something.
+
+def hatch_lines(message: str, key: str) -> list[str]:
+    """What follows `key:` on each line of the message that STARTS with it.
+
+    The line must start with the key (an exact line prefix, never a mention inside a
+    sentence). The text is stripped but not judged: a hatch that carries more than a
+    reason (`slow-test:` names a test and states a duration) judges its own content.
     """
-    for line in message.splitlines():
-        if line.startswith(key + ":") and len(line[len(key) + 1 :].strip()) >= min_reason:
-            return True
-    return False
+    return [line[len(key) + 1 :].strip() for line in message.splitlines() if line.startswith(key + ":")]
+
+
+def hatch(message: str, key: str, min_reason: int = MIN_REASON) -> bool:
+    """True when the commit message has a line `key: <reason>` with a real reason."""
+    return any(len(body) >= min_reason for body in hatch_lines(message, key))
