@@ -15,7 +15,7 @@ install beyond `pre-commit` and `python3`.
 | `guardrail-selfcheck` | commit, first | a hook type is not installed, a guardrail hook is missing from the config, or a built-in canary no longer bites |
 | `guardrail-staged` | commit | a staged test adds a skipped, focused, empty or self-comparing test; a document adds a `path:line` citation that is dead; the switched-on registry is malformed |
 | `guardrail-perturb` | commit | a new assertion stays green after its expected value is replaced with a wrong one |
-| `guardrail-commit-gate` | commit message | production code has no test staged; the commit is over the size cap; a shared figure changes without its cross-view test; something that must be switched on has no registry entry |
+| `guardrail-commit-gate` | commit message | production code has no test staged; the commit is over the size cap; a shared figure changes without its cross-view test; something that must be switched on has no registry entry; a staged test is over the time budget (`timeBudget`, off until configured) |
 
 Only the lines a commit adds are judged, so code written before the guardrail does not
 block new work.
@@ -58,7 +58,8 @@ block new work.
        "max": 12,
        "timeoutSeconds": 180
      },
-     "switchedOn": { "registry": ".agents/SWITCHED_ON.md", "triggers": ["drizzle/*.sql"], "staleDays": 30 }
+     "switchedOn": { "registry": ".agents/SWITCHED_ON.md", "triggers": ["drizzle/*.sql"], "staleDays": 30 },
+     "timeBudget": { "report": "tests/report_related.json", "format": "jest-json", "testMs": 5000, "fileMs": 20000 }
    }
    ```
 
@@ -75,6 +76,7 @@ at least ten characters. A mention inside a sentence does not count.
 | `size-ok: <why it cannot be split>` | the size cap |
 | `cross-view-na: <why no shared figure changes>` | the cross-view rule |
 | `no-switch-on: <why nothing has to be switched on>` | the switched-on trigger |
+| `slow-test: <test name> \| <measured duration> \| <why it has to be this slow>` | one test (or file) over the time budget; one line per item |
 
 In a test file, `// guardrail: allow-skip <reason>` on the line allows a conditional
 skip, and `// guardrail: no-perturb <reason>` leaves an assertion out of the perturbation.
@@ -199,6 +201,64 @@ committed, and a test that runs `git init` or `git config` in a scratch folder w
 write into that repository instead. The cost: a test that needs a `GIT_*` variable
 (`GIT_SSH_COMMAND`, `GIT_CONFIG_GLOBAL`) must set it itself; none of the projects' do.
 
+## Time budget for new or changed tests
+
+A slow test is cheapest to fix when it is written. `timeBudget` makes the commit read the
+durations of the tests it adds or changes, and refuse one that is over budget. It is off
+until a project writes the block:
+
+```json
+"timeBudget": { "report": "tests/report_related.json", "format": "jest-json", "testMs": 5000, "fileMs": 20000 }
+```
+
+- `report` is a Jest-shaped JSON report (the shape of `perturb`'s `jest-json`; Vitest's
+  `json` reporter writes it) that the project's related-tests hook produces **during the
+  same commit**, beside its normal output. For Vitest that is adding
+  `--reporter=default --reporter=json --outputFile=tests/report_related.json` to the hook
+  command. The report is not versioned.
+- `testMs` and `fileMs` default to 5000 and 20000 when the block leaves them out: a
+  starting point for a project to replace with figures measured on its own suite. They must
+  be whole numbers above zero; an unknown key or format is a configuration error (exit 2).
+- It judges **only the tests of STAGED test files** (added or modified): one test over
+  `testMs`, or a staged file whose tests add up over `fileMs`. Exactly at the budget passes.
+  A test without a duration (skipped) counts as zero.
+- It runs in `commit-gate` (the commit-message stage), the only place that sees the
+  message, and so the hatch.
+
+### The hatch
+
+One line per item over budget, written as three parts separated by `|`:
+
+```
+slow-test: pricing > adds twice | 6200ms | talks to the real database on purpose
+```
+
+The content is checked, not only the prefix. The first part names the item: a test's full
+name, or a substring that matches exactly one item over budget (the path of the file for a
+file over `fileMs`); a full name wins over a longer name that contains it. The second is a
+measured duration, `1400ms` or `1.4s`, and must exceed that item's budget (a test that was
+over budget cannot honestly have taken less). The third is a reason of at least ten
+characters. A line that names nothing over budget is an error too (a stale line, or a
+typo), so the hatch does not outlive the problem. The line must start with `slow-test:`.
+
+### How the lock knows the report belongs to this commit
+
+It does not know it, it checks the cheap evidence it has, per staged test file:
+
+1. The file must be **in the report**. Not being in it is a note, not a failure: an
+   end-to-end suite the related run never executes would otherwise block every commit.
+2. The file must **not be newer than the report** (modification time of the working
+   copy against the time the report was written). A report older than the file measured
+   a previous version of it, so that file is a note and is not judged.
+3. A **missing report** is a note. A report that exists and is not a Jest-shaped report is
+   a problem: the lock cannot look and does not pass.
+
+A commit that stages no test file is not judged at all, whatever the report says.
+
+Notes appear on stderr, which `pre-commit` shows only when a hook fails. So a project whose
+hook never writes the report gets no complaint: check it once by hand
+(`python3 bin/guardrail commit-gate .git/COMMIT_EDITMSG` after a commit that stages a test).
+
 ## Honest limits
 
 - **The size cap and the cross-view rule trust a typed reason.** A hatch is a person's
@@ -207,6 +267,12 @@ write into that repository instead. The cost: a test that needs a `GIT_*` variab
   check that the test really compares two views.
 - **A runner with `"command": null`** declares a suite that cannot run at commit time
   (a browser suite): its assertions are not perturbed, and the hook says so.
+- **The time budget trusts a clock and a file.** Freshness is the report's modification
+  time against the staged file's; it does not prove the report came from this commit's run.
+  Durations of a loaded machine are noisy, so a budget is set with room (a test that is
+  borderline fails on a busy day). A staged file that `pre-commit` rewrote while restoring
+  unstaged changes looks newer than the report and is skipped with a note. A test the
+  related run never executes is never timed here; the push suite is its backstop.
 - **A one-by-one check counts any non-zero exit as "fails".** A crash, a timeout or a
   syntax error in the perturbed file also kills the mutant. The batch is stricter: it
   needs the sentinel in a failed test's message.
