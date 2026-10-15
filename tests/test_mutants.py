@@ -242,6 +242,14 @@ MUTANTS = [
     ("guardrail/locks.py", "installed = \"pre-commit\" in handle.read() and os.access(path, os.X_OK)", "installed = \"pre-commit\" in handle.read()", "a hook that is not executable counts as installed"),
     ("guardrail/locks.py", "installed = \"pre-commit\" in handle.read() and os.access(path, os.X_OK)", "installed = os.access(path, os.X_OK)", "a hook that pre-commit did not write counts as installed"),
     ("guardrail/locks.py", "            installed = False\n        if not installed:", "            installed = True\n        if not installed:", "a hook that is missing counts as installed"),
+    # --- the hatches of the cross-view and switched-on locks ---
+    ("guardrail/locks.py", "if core.hatch(message, \"cross-view-na\"):\n            continue", "if False:\n            continue", "the cross-view hatch never opens"),
+    ("guardrail/locks.py", "if core.hatch(message, \"cross-view-na\"):", "if \"cross-view-na\" in message:", "a mention of the cross-view hatch opens the lock"),
+    ("guardrail/locks.py", "core.hatch(message, \"cross-view-na\")", "core.hatch(message, \"cross-view-na\", 0)", "the cross-view hatch needs no reason"),
+    ("guardrail/locks.py", "if not touched or any(core.matches(p, rule[\"tests\"]) for p in staged):\n            continue", "if not touched or any(core.matches(p, rule[\"tests\"]) for p in staged):\n            break", "a cross-view rule that is met ends the check"),
+    ("guardrail/locks.py", "if core.hatch(message, \"no-switch-on\"):\n        return []", "if False:\n        return []", "the switched-on hatch never opens"),
+    ("guardrail/locks.py", "if core.hatch(message, \"no-switch-on\"):", "if \"no-switch-on\" in message:", "a mention of the switched-on hatch opens the lock"),
+    ("guardrail/locks.py", "core.hatch(message, \"no-switch-on\")", "core.hatch(message, \"no-switch-on\", 0)", "the switched-on hatch needs no reason"),
 ]
 
 

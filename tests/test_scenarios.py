@@ -443,6 +443,29 @@ class CrossView(Scenario):
         repo.stage("test/other.test.ts", "it('t', () => { expect(t).toBe(1) })\n")
         self.expect(repo.gate("fix: other\n"), 0)
 
+    def test_a_rule_that_is_met_does_not_hide_the_next_one_that_is_not(self):
+        rules = [
+            {"name": "billing", "paths": ["src/billing/**"], "tests": ["test/consistency/**"]},
+            {"name": "tax", "paths": ["src/tax/**"], "tests": ["test/consistency-tax/**"]},
+        ]
+        repo = Repo(self, {**CONFIG, "crossView": rules})
+        repo.stage("src/billing/total.ts", "export const t = 1\n")
+        repo.stage("test/consistency/total.test.ts", "it('t', () => { expect(a()).toBe(b()) })\n")  # meets billing only
+        repo.stage("src/tax/rate.ts", "export const r = 1\n")
+        code, out = repo.gate("fix: both\n")
+        self.assertEqual(code, 1, out)
+        self.assertIn("[tax] src/tax/rate.ts changes a figure", out)
+        self.assertNotIn("[billing]", out)
+
+    def test_the_hatch_opens_it_with_a_reason_and_not_as_a_mention_or_without_one(self):
+        repo = Repo(self)
+        repo.stage("src/billing/total.ts", "export const t = 1\n")
+        repo.stage("test/total.test.ts", "it('t', () => { expect(t).toBe(1) })\n")
+        self.expect(repo.gate("fix: comment\n\ncross-view-na: only a comment changed, no figure moves\n"), 0)
+        refused = "[billing] src/billing/total.ts changes a figure"
+        self.expect(repo.gate("fix: comment, see cross-view-na: only a comment changed\n"), 1, refused)
+        self.expect(repo.gate("fix: comment\n\ncross-view-na: n/a\n"), 1, refused)
+
 
 class SwitchedOn(Scenario):
     ENTRY = "### nightly job\n- **State**: ON\n- **Who switches it on**: person (ops)\n- **Check**: `crontab -l`\n- **Last check**: 2026-10-01 → listed\n"
@@ -470,6 +493,13 @@ class SwitchedOn(Scenario):
         repo = Repo(self)
         repo.stage(".agents/SWITCHED_ON.md", self.ENTRY.replace("2026-10-01", "2020-01-01"))
         self.expect(repo.run("staged"), 0, "note: nightly job: last checked")
+
+    def test_the_hatch_opens_it_with_a_reason_and_not_as_a_mention_or_without_one(self):
+        repo = Repo(self)
+        repo.stage("migrations/0001.sql", "select 1;\n")
+        self.expect(repo.gate("feat: view\n\nno-switch-on: a view only, nothing to apply\n"), 0)
+        self.expect(repo.gate("feat: view, see no-switch-on: a view only, nothing to apply\n"), 1, "has to be switched on")
+        self.expect(repo.gate("feat: view\n\nno-switch-on: n/a\n"), 1, "has to be switched on")
 
 
 class LiveCitations(Scenario):
