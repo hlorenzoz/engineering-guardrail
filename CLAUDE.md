@@ -35,6 +35,7 @@ Operating guide for AI agents working in this repository: the shared git hooks
 | :--- | :--- |
 | `guardrail/core.py` | Configuration, path classification, git access, hatches |
 | `guardrail/locks.py` | The locks and the built-in canaries; the one reader of a Jest-shaped report |
+| `guardrail/schema.py` | The reader of migration SQL for the foreign key index lock: tables, keys and indexes, no database |
 | `guardrail/perf.py` | The timing record of the full suite (`perf-gate`), a command and not a lock |
 | `guardrail/cli.py` | Commands, messages and exit codes |
 | `bin/guardrail` | The entry point the hooks call |

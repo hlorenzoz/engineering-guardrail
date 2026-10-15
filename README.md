@@ -374,7 +374,7 @@ not tune how much slower is too slow.
 | Command | What it does |
 | :--- | :--- |
 | `just test` | The canary scenarios: every lock on a throwaway repository, through the real command line |
-| `just mutants` | Breaks each lock on purpose and requires the scenarios to turn red (about 4 minutes) |
+| `just mutants` | Breaks each lock on purpose and requires the scenarios to turn red. Measured: 29 minutes for 156 mutants, 3 workers, no other test run on the machine (2026-10-15, `8253b9c`); it prints one line per mutant with the scenario that killed it |
 | `just check` | Both |
 
 A change to a lock ships with its scenario (must bite, must stay quiet) and its mutant.
