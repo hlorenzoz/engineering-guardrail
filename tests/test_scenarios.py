@@ -318,8 +318,9 @@ class FixNeedsTest(Scenario):
         repo = Repo(self)
         repo.stage("src/a.ts", "export const a = 1\n")
         self.expect(repo.gate("fix: a\n\nno-test: rename only, covered by the type check\n"), 0)
-        self.expect(repo.gate("fix: a, see no-test: rename only, covered by types\n"), 1)
-        self.expect(repo.gate("fix: a\n\nno-test: n/a\n"), 1)
+        # Refused for the right reason: the lock found production code and no test, not any other failure.
+        self.expect(repo.gate("fix: a, see no-test: rename only, covered by types\n"), 1, "production file(s) staged and no test")
+        self.expect(repo.gate("fix: a\n\nno-test: n/a\n"), 1, "production file(s) staged and no test")
 
     def test_stays_quiet_on_documentation_only(self):
         repo = Repo(self)
