@@ -13,6 +13,7 @@ GUARDRAIL_MUTANT_WORKERS (default 3) is how many mutants run at once.
 
 import concurrent.futures
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -193,6 +194,12 @@ def selected(mutants):
     return [m for m in mutants if not wanted or any(text in m[3] or text in m[0] for text in wanted)]
 
 
+def killer(result):
+    """` <- <first failing scenario>` from the output of a failed run (the first FAIL or ERROR header)."""
+    first = re.search(r"^(?:FAIL|ERROR): (.+)$", result.stderr.decode("utf-8", "replace"), re.M)
+    return f" <- {first.group(1)}" if first else " <- (no failing scenario named in the output)"
+
+
 class LocksAreGuarded(unittest.TestCase):
     def test_every_mutant_is_killed_by_the_scenarios(self):
         survivors, not_applied = [], []
@@ -226,8 +233,15 @@ class LocksAreGuarded(unittest.TestCase):
             if source.count(original) != 1:
                 print(f"NOT APPLIED {file}: {label}", file=sys.stderr, flush=True)
                 return f"{label} (found {source.count(original)} times)", "not applied"
+            mutated = source.replace(original, replacement)
+            try:
+                compile(mutated, target, "exec")
+            except SyntaxError as error:
+                # Code that does not compile is "killed" by any scenario at all: that proves nothing about the lock.
+                print(f"NOT APPLIED {file}: {label} (does not compile: {error.msg}, line {error.lineno})", file=sys.stderr, flush=True)
+                return f"{label} (does not compile: {error.msg})", "not applied"
             with open(target, "w", encoding="utf-8") as handle:
-                handle.write(source.replace(original, replacement))
+                handle.write(mutated)
             result = subprocess.run(
                 [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_scenarios"],
                 cwd=snapshot,
@@ -235,8 +249,9 @@ class LocksAreGuarded(unittest.TestCase):
                 capture_output=True,
             )
             killed = result.returncode != 0
-            # One line per mutant, so the log of a run says which lock each one broke.
-            print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}", file=sys.stderr, flush=True)
+            # One line per mutant, so the log of a run says which lock each one broke and WHICH scenario
+            # saw it: a mutant killed by an incidental crash looks different from one killed by its lock's scenario.
+            print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}{killer(result) if killed else ''}", file=sys.stderr, flush=True)
             return label, "killed" if killed else "survived"
 
 
