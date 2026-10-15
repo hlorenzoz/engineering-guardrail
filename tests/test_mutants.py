@@ -235,6 +235,13 @@ MUTANTS = [
     # --- the rules of CLAUDE.md: Python 3.9 syntax and the standard library ---
     ("guardrail/cli.py", "def main(argv: list[str] | None = None) -> int:\n    args", "def main(argv: list[str] | None = None) -> int:\n    match 1:\n        case 1:\n            pass\n    args", "syntax newer than Python 3.9"),
     ("guardrail/locks.py", "import secrets\n", "import secrets\nimport yaml\n", "an import that is not the standard library"),
+    # --- the canaries of the self-check ---
+    ("guardrail/locks.py", "    problems = canaries()\n", "    problems = []\n", "selfcheck does not run the canaries"),
+    ("guardrail/locks.py", "    return failures\n", "    return []\n", "the canaries report nothing"),
+    ("guardrail/locks.py", "        if not condition:\n            failures.append", "        if False:\n            failures.append", "a canary that fails is not reported"),
+    ("guardrail/locks.py", "installed = \"pre-commit\" in handle.read() and os.access(path, os.X_OK)", "installed = \"pre-commit\" in handle.read()", "a hook that is not executable counts as installed"),
+    ("guardrail/locks.py", "installed = \"pre-commit\" in handle.read() and os.access(path, os.X_OK)", "installed = os.access(path, os.X_OK)", "a hook that pre-commit did not write counts as installed"),
+    ("guardrail/locks.py", "            installed = False\n        if not installed:", "            installed = True\n        if not installed:", "a hook that is missing counts as installed"),
 ]
 
 
