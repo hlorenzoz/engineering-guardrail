@@ -191,7 +191,7 @@ MUTANTS = [
     ("guardrail/locks.py", "            os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))\n", "", "a perturbed file comes back with a new modification time"),
     # --- fake tests: every pattern and every kind of comment ---
     ("guardrail/locks.py", "\\(\\s*\\1\\s*\\)", "\\(\\s*[^)]*\\)", "any assertion on a literal is a tautology"),
-    ("guardrail/locks.py", "    (re.compile(r\"\\b(?:xit|xdescribe|xtest|fit|fdescribe)\\s*\\(\"), \"focused or skipped test\"),\n", "", "xit, fit and their family are not seen"),
+    ("guardrail/locks.py", "    (re.compile(r\"\\b(?:xit|xdescribe|xtest|fit|fdescribe)\\s*\\(\"), \"focused or skipped test\"),\n", "", "xit and fit and their family are not seen"),
     ("guardrail/locks.py", "r\"\\b(?:xit|", "r\"(?:xit|", "a name that ends in xit or fit is a skip"),
     ("guardrail/locks.py", "    (re.compile(r\"expect\\(\\s*true\\s*\\)\\s*\\.\\s*toBeTruthy\\(\\s*\\)\"), \"assertion that cannot fail\"),\n", "", "expect(true).toBeTruthy() is not seen"),
     ("guardrail/locks.py", "(?:only|skip|todo|skipIf|runIf)", "(?:skip|todo|skipIf|runIf)", "it.only is not seen"),
