@@ -262,6 +262,13 @@ MUTANTS = [
     ("guardrail/locks.py", "(\\d+)(?:-\\d+)?", "(\\d+)", "a citation of a range of lines is not read"),
     ("guardrail/cli.py", "if command == \"citations\":", "if command == \"citationz\":", "the citations command does not exist"),
     ("guardrail/cli.py", "return _report(command, problems, [f\"{unresolved} citation(s) point outside this repository\"])", "return _report(command, problems)", "the citations command hides what it could not judge"),
+    # --- citations: the whole-repository command, what a commit adds, the file filter, ranges, the usage ---
+    ("guardrail/cli.py", "if len(rest) != 1:", "if not rest:", "a commit-gate with two arguments reads the first"),
+    ("guardrail/cli.py", "if not args:\n        print(USAGE, file=sys.stderr)\n        return 2", "if not args:\n        print(USAGE, file=sys.stderr)\n        return 0", "no command exits zero"),
+    # --- the configuration and git ---
+    ("guardrail/core.py", "if key not in DEFAULTS:", "if False:", "an unknown key of the configuration is ignored"),
+    ("guardrail/core.py", "if not os.path.exists(path):\n            return cls()", "if False:\n            return cls()", "a repository without a configuration file is an error"),
+    ("guardrail/core.py", "if check and result.returncode != 0:", "if False:", "a git command that fails answers nothing"),
 ]
 
 

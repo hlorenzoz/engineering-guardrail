@@ -1795,6 +1795,29 @@ class Wiring(Scenario):
         self.assertIn("the commit-msg hook is not installed", out)
         self.assertNotIn("the pre-push hook is not installed", out)
 
+    def test_no_command_and_a_commit_gate_without_exactly_one_message_file_print_the_usage(self):
+        repo = Repo(self)
+        for args in ((), ("commit-gate",), ("commit-gate", "one", "two")):
+            with self.subTest(args=args):
+                self.expect(repo.run(*args), 2, "usage: guardrail")
+
+    def test_an_unknown_key_in_the_configuration_never_passes(self):
+        repo = Repo(self)
+        repo.write(".guardrail.json", json.dumps({"productoin": ["src/**"]}))
+        self.expect(repo.run("staged"), 2, "unknown key 'productoin'")
+
+    def test_a_repository_without_a_configuration_file_gets_the_defaults(self):
+        repo = Repo(self)
+        os.remove(os.path.join(repo.root, ".guardrail.json"))
+        repo.stage("src/a.ts", "export const a = 1\n")  # production by default
+        self.expect(repo.gate("fix: a\n"), 1, "production file(s) staged and no test")
+
+    def test_a_lock_run_outside_a_repository_cannot_look_and_does_not_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(["python3", BIN, "staged"], cwd=tmp, capture_output=True, text=True, env=CLEAN_ENV, timeout=90)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("cannot look, so it does not pass", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
