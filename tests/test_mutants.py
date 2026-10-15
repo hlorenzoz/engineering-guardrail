@@ -250,6 +250,10 @@ MUTANTS = [
     ("guardrail/locks.py", "if core.hatch(message, \"no-switch-on\"):\n        return []", "if False:\n        return []", "the switched-on hatch never opens"),
     ("guardrail/locks.py", "if core.hatch(message, \"no-switch-on\"):", "if \"no-switch-on\" in message:", "a mention of the switched-on hatch opens the lock"),
     ("guardrail/locks.py", "core.hatch(message, \"no-switch-on\")", "core.hatch(message, \"no-switch-on\", 0)", "the switched-on hatch needs no reason"),
+    # --- the age of a registry check, and its shape ---
+    ("guardrail/locks.py", "if age > stale_days:", "if age >= stale_days:", "a check exactly at staleDays is old"),
+    ("guardrail/locks.py", "if age > stale_days:", "if True:", "every check is old"),
+    ("guardrail/locks.py", "if fields.get(\"Last check\", \"\").strip() and not last:", "if False:", "a Last check that is not a date is accepted"),
 ]
 
 

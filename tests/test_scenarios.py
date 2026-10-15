@@ -6,6 +6,7 @@ another copy of the code: test_mutants.py uses it to prove these scenarios turn
 red when a lock is broken.
 """
 
+import datetime
 import json
 import os
 import shutil
@@ -500,6 +501,29 @@ class SwitchedOn(Scenario):
         self.expect(repo.gate("feat: view\n\nno-switch-on: a view only, nothing to apply\n"), 0)
         self.expect(repo.gate("feat: view, see no-switch-on: a view only, nothing to apply\n"), 1, "has to be switched on")
         self.expect(repo.gate("feat: view\n\nno-switch-on: n/a\n"), 1, "has to be switched on")
+
+    STALE_DAYS = 5
+
+    def aged(self, days):
+        """The registry entry, last checked `days` ago by the calendar of the machine (a relation to today,
+        not a date written here). A run that straddles midnight could read it a day older: a window of a
+        fraction of a second a day."""
+        return self.ENTRY.replace("2026-10-01", (datetime.date.today() - datetime.timedelta(days=days)).isoformat())
+
+    def test_a_check_within_the_stale_days_gives_no_note_and_one_past_them_does(self):
+        config = {**CONFIG, "switchedOn": {"triggers": ["migrations/**"], "staleDays": self.STALE_DAYS}}
+        for age, noted in ((0, False), (self.STALE_DAYS, False), (self.STALE_DAYS + 1, True)):
+            with self.subTest(days_ago=age):
+                repo = Repo(self, config)
+                repo.stage(".agents/SWITCHED_ON.md", self.aged(age))
+                code, out = repo.run("staged")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(f"nightly job: last checked {age} days ago" in out, noted, out)
+
+    def test_a_last_check_that_is_not_a_date_and_a_real_output_is_refused(self):
+        repo = Repo(self)
+        repo.stage(".agents/SWITCHED_ON.md", self.ENTRY.replace("2026-10-01 → listed", "it worked yesterday"))
+        self.expect(repo.run("staged"), 1, "nightly job: Last check must be 'YYYY-MM-DD")
 
 
 class LiveCitations(Scenario):
