@@ -591,10 +591,16 @@ class PerturbBatch(Scenario):
         self.assertEqual(len(set(round_one.values())), 3, "two assertions share a sentinel")
 
     def test_a_sentinel_that_already_appears_in_the_file_is_not_used(self):
-        repo = self.repo("// 988654003 is in the file\ntest one\n  expect(1).toBe(1)\ntest two\n  expect(2).toBe(2)\n")
-        self.expect(self.perturb(repo), 0)
-        values = list(self.runs(repo)[1][1].values())
-        self.assertNotIn("988654003", values)
+        # The sentinel is learned from a first run, never written here: the test holds whatever the
+        # lock's base and stride become. A second file that already contains it must not get it.
+        tests = "test one\n  expect(1).toBe(1)\ntest two\n  expect(2).toBe(2)\n"
+        first = self.repo(tests)
+        self.expect(self.perturb(first), 0)
+        taken = self.runs(first)[1][1][2]  # the sentinel the first assertion (line 2) was given
+        second = self.repo("// " + taken + " is in the file\n" + tests)
+        self.expect(self.perturb(second), 0)
+        values = list(self.runs(second)[1][1].values())
+        self.assertNotIn(taken, values)
         self.assertEqual(len(set(values)), 2)
 
     def test_the_difference_a_close_to_matcher_prints_is_not_another_assertions_sentinel(self):
@@ -686,7 +692,13 @@ class PerturbBatch(Scenario):
         self.assertEqual(code, 1, out)
         self.assertIn("test/a.test.ts:4: " + self.LIMIT.format(2), out)
         self.assertEqual(self.shape(repo), [(False, []), (False, [2]), (False, [4]), (False, [6])])
-        self.assertEqual([values for _, values in self.runs(repo)[1:]], [{2: "987654"}, {4: "987654"}, {6: "987654"}])
+        # One assertion per run, replaced by a value that is not the one it expected (the digits are the lock's own).
+        alone = self.runs(repo)[1:]
+        self.assertEqual([list(values) for _, values in alone], [[2], [4], [6]])
+        for (_, values), original in zip(alone, ("1", "2", "3")):
+            (replacement,) = values.values()
+            self.assertNotEqual(replacement, original)
+            self.assertRegex(replacement, r"^\d+$")
 
     # --- the working copy always comes back --------------------------------
 
