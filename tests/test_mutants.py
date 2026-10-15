@@ -234,7 +234,7 @@ MUTANTS = [
     ("guardrail/locks.py", "if not all(isinstance(m, str) for m in test[\"failureMessages\"]):", "if False:", "a report whose failure message is not a string is read"),
     # --- the rules of CLAUDE.md: Python 3.9 syntax and the standard library ---
     ("guardrail/cli.py", "def main(argv: list[str] | None = None) -> int:\n    args", "def main(argv: list[str] | None = None) -> int:\n    match 1:\n        case 1:\n            pass\n    args", "syntax newer than Python 3.9"),
-    ("guardrail/locks.py", "import secrets\n", "import secrets\nimport yaml\n", "an import that is not the standard library"),
+    ("guardrail/core.py", "    return any(len(body) >= min_reason for body in hatch_lines(message, key))", "    import yaml\n    return any(len(body) >= min_reason for body in hatch_lines(message, key))", "an import of a library that is not the standard one, inside a function"),
     # --- the canaries of the self-check ---
     ("guardrail/locks.py", "    problems = canaries()\n", "    problems = []\n", "selfcheck does not run the canaries"),
     ("guardrail/locks.py", "    return failures\n", "    return []\n", "the canaries report nothing"),
