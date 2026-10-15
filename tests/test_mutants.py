@@ -269,6 +269,13 @@ MUTANTS = [
     ("guardrail/core.py", "if key not in DEFAULTS:", "if False:", "an unknown key of the configuration is ignored"),
     ("guardrail/core.py", "if not os.path.exists(path):\n            return cls()", "if False:\n            return cls()", "a repository without a configuration file is an error"),
     ("guardrail/core.py", "if check and result.returncode != 0:", "if False:", "a git command that fails answers nothing"),
+    # --- perturbation: what is left out and what is run ---
+    ("guardrail/locks.py", "if _is_comment(line) or NO_PERTURB in line or \".not.\" in line:", "if NO_PERTURB in line or \".not.\" in line:", "an assertion in a comment is perturbed"),
+    ("guardrail/locks.py", "if _is_comment(line) or NO_PERTURB in line or \".not.\" in line:", "if _is_comment(line) or \".not.\" in line:", "the no-perturb hatch is ignored"),
+    ("guardrail/locks.py", "if _is_comment(line) or NO_PERTURB in line or \".not.\" in line:", "if _is_comment(line) or NO_PERTURB in line:", "a negated assertion is perturbed"),
+    ("guardrail/locks.py", "NO_PERTURB = \"guardrail: no-perturb\"", "NO_PERTURB = \"guardrail: no-perturb!\"", "the no-perturb hatch is renamed"),
+    ("guardrail/locks.py", "if not config.is_test(path):\n            continue\n        sites =", "if False:\n            continue\n        sites =", "a staged file that is not a test is perturbed"),
+    ("guardrail/locks.py", "if not sites:\n            continue", "if False:\n            continue", "a test with nothing to perturb is run"),
 ]
 
 

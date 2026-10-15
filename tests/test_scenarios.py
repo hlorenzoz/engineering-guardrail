@@ -653,6 +653,22 @@ class Perturb(Scenario):
         _, out = repo.run("perturb")
         self.assertIn("not perturbed (limit of 2 per commit reached)", out)
 
+    def test_the_hatch_leaves_an_assertion_out_and_it_is_the_hatch_that_does(self):
+        repo = Repo(self)
+        repo.stage("test/a.test.py", self.script(False))
+        self.expect(repo.run("perturb"), 1, "still green with the expected value 4 replaced")
+        hatched = self.script(False).replace('"expect(v).toBe(4)"', '"expect(v).toBe(4)"  # guardrail: no-perturb a float with noise')
+        self.assertNotEqual(hatched, self.script(False))
+        repo.stage("test/a.test.py", hatched)
+        self.expect(repo.run("perturb"), 0)
+
+    def test_a_staged_file_that_is_not_a_test_and_a_test_with_nothing_to_replace_are_not_run(self):
+        # Either would fail if it were run: the first has no runner, the second is not even Python.
+        repo = Repo(self)
+        repo.stage("src/a.ts", "expect(v).toBe(4)\n")
+        repo.stage("test/a.test.py", "this is not python and has no expected value\n")
+        self.expect(repo.run("perturb"), 0)
+
 
 class HookEnvironment(Scenario):
     def test_the_scenarios_run_under_the_git_environment_of_a_hook(self):
