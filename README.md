@@ -373,9 +373,18 @@ not tune how much slower is too slow.
 
 | Command | What it does |
 | :--- | :--- |
-| `just test` | The canary scenarios: every lock on a throwaway repository, through the real command line |
+| `just test` | The direct tests of the pure readers (`tests/test_units.py`: fake-test patterns, replaceable expected values, globs, the report reader, the 3.9 and standard-library rules), then the canary scenarios: every lock on a throwaway repository, through the real command line |
 | `just mutants` | Breaks each lock on purpose and requires the scenarios to turn red. Measured: 29 minutes for 156 mutants, 3 workers, no other test run on the machine (2026-10-15, `8253b9c`); it prints one line per mutant with the scenario that killed it |
 | `just check` | Both |
 
-A change to a lock ships with its scenario (must bite, must stay quiet) and its mutant.
+A change to a lock ships with its scenario (must bite, must stay quiet) and its mutant. A rule that
+is a table or a pure function (which lines are fake tests, which expected values are replaced, what
+a glob matches) is also tested directly in `tests/test_units.py`, one line per case; the scenario
+stays, because the lock is the command line.
+
+The Python 3.9 rule is checked by parsing every source with `ast.parse(feature_version=(3, 9))` and
+by running the scenarios with a 3.9 `python3` first in the `PATH`. The parse covers syntax only: a
+`X | Y` evaluated at run time, or a library function newer than 3.9, passes it and fails on 3.9. The
+scenarios start the guardrail as `python3`, so they test the interpreter that comes first in the
+`PATH`, not the one that runs them: to test 3.9, put a directory whose `python3` is 3.9 first.
 Release by tagging; projects move to the new version by changing `rev`.

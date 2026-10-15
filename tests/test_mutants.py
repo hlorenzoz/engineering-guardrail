@@ -5,7 +5,8 @@ Each mutant replaces one literal that must occur EXACTLY once in its file; a
 mutant that cannot be applied is a failure, because it proves nothing.
 
 The run works on a snapshot of the repository taken when it starts, so the code can be
-edited while it goes. A mutant stops at the first scenario that fails (that is a kill).
+edited while it goes. A mutant stops at the first test that fails (that is a kill): the direct
+tests of tests/test_units.py first, which take milliseconds, then the scenarios.
 GUARDRAIL_MUTANTS=<text> runs only the mutants whose label or file contains the text
 (comma-separated for several); it is for the work in progress, never for a release.
 GUARDRAIL_MUTANT_WORKERS (default 3) is how many mutants run at once.
@@ -188,6 +189,52 @@ MUTANTS = [
     ("guardrail/locks.py", "    if set(raw) - _FK_INDEX_KEYS:", "    if False:", "a misspelled foreign key lock key is ignored"),
     ("guardrail/locks.py", "COMMIT_GATE = [fix_needs_test, size_cap, cross_view, switch_on_trigger, fk_index]", "COMMIT_GATE = [fix_needs_test, size_cap, cross_view, switch_on_trigger]", "the foreign key lock is not in the commit gate"),
     ("guardrail/locks.py", "            os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))\n", "", "a perturbed file comes back with a new modification time"),
+    # --- fake tests: every pattern and every kind of comment ---
+    ("guardrail/locks.py", "\\(\\s*\\1\\s*\\)", "\\(\\s*[^)]*\\)", "any assertion on a literal is a tautology"),
+    ("guardrail/locks.py", "    (re.compile(r\"\\b(?:xit|xdescribe|xtest|fit|fdescribe)\\s*\\(\"), \"focused or skipped test\"),\n", "", "xit, fit and their family are not seen"),
+    ("guardrail/locks.py", "r\"\\b(?:xit|", "r\"(?:xit|", "a name that ends in xit or fit is a skip"),
+    ("guardrail/locks.py", "    (re.compile(r\"expect\\(\\s*true\\s*\\)\\s*\\.\\s*toBeTruthy\\(\\s*\\)\"), \"assertion that cannot fail\"),\n", "", "expect(true).toBeTruthy() is not seen"),
+    ("guardrail/locks.py", "(?:only|skip|todo|skipIf|runIf)", "(?:skip|todo|skipIf|runIf)", "it.only is not seen"),
+    ("guardrail/locks.py", "(?:only|skip|todo|skipIf|runIf)", "(?:only|skip|skipIf|runIf)", "it.todo is not seen"),
+    ("guardrail/locks.py", "(?:only|skip|todo|skipIf|runIf)", "(?:only|skip|todo|runIf)", "it.skipIf is not seen"),
+    ("guardrail/locks.py", "(?:only|skip|todo|skipIf|runIf)", "(?:only|skip|todo|skipIf)", "it.runIf is not seen"),
+    ("guardrail/locks.py", "(?:describe|it|test|suite|bench)", "(?:describe|it|test)", "suite.skip and bench.skip are not seen"),
+    ("guardrail/locks.py", "return stripped.startswith(\"//\") or stripped.startswith(\"*\") or stripped.startswith(\"/*\")", "return stripped.startswith(\"*\") or stripped.startswith(\"/*\")", "a line comment is read as code"),
+    ("guardrail/locks.py", "return stripped.startswith(\"//\") or stripped.startswith(\"*\") or stripped.startswith(\"/*\")", "return stripped.startswith(\"//\") or stripped.startswith(\"/*\")", "the middle of a block comment is read as code"),
+    ("guardrail/locks.py", "return stripped.startswith(\"//\") or stripped.startswith(\"*\") or stripped.startswith(\"/*\")", "return stripped.startswith(\"//\") or stripped.startswith(\"*\")", "the start of a block comment is read as code"),
+    ("guardrail/locks.py", "found.append((number, reason))\n                break", "found.append((number, reason))", "a line that two patterns match is found twice"),
+    # --- perturbation: which values and which matchers ---
+    ("guardrail/locks.py", "\\.(toBe|toEqual|toStrictEqual|toHaveLength|toBeCloseTo|toHaveBeenCalledTimes)\\(", "\\.(toBe|toStrictEqual|toHaveLength|toBeCloseTo|toHaveBeenCalledTimes)\\(", "toEqual is not perturbed"),
+    ("guardrail/locks.py", "\\.(toBe|toEqual|toStrictEqual|toHaveLength|toBeCloseTo|toHaveBeenCalledTimes)\\(", "\\.(toBe|toEqual|toHaveLength|toBeCloseTo|toHaveBeenCalledTimes)\\(", "toStrictEqual is not perturbed"),
+    ("guardrail/locks.py", "\\.(toBe|toEqual|toStrictEqual|toHaveLength|toBeCloseTo|toHaveBeenCalledTimes)\\(", "\\.(toBe|toEqual|toStrictEqual|toBeCloseTo|toHaveBeenCalledTimes)\\(", "toHaveLength is not perturbed"),
+    ("guardrail/locks.py", "\\.(toBe|toEqual|toStrictEqual|toHaveLength|toBeCloseTo|toHaveBeenCalledTimes)\\(", "\\.(toBe|toEqual|toStrictEqual|toHaveLength|toHaveBeenCalledTimes)\\(", "toBeCloseTo is not perturbed"),
+    ("guardrail/locks.py", "\\.(toBe|toEqual|toStrictEqual|toHaveLength|toBeCloseTo|toHaveBeenCalledTimes)\\(", "\\.(toBe|toEqual|toStrictEqual|toHaveLength|toBeCloseTo)\\(", "toHaveBeenCalledTimes is not perturbed"),
+    ("guardrail/locks.py", "(?=\\s*[,)])", "", "a computed expected value is perturbed in its first literal"),
+    ("guardrail/locks.py", "(-?\\d[\\d_]*(?:\\.\\d+)?|", "(\\d[\\d_]*(?:\\.\\d+)?|", "a negative number is not perturbed"),
+    ("guardrail/locks.py", "\\d[\\d_]*", "\\d*", "a number with an underscore is not perturbed"),
+    ("guardrail/locks.py", "(?:\\.\\d+)?|'(?:", "|'(?:", "a decimal number is not perturbed"),
+    ("guardrail/locks.py", "'(?:[^'\\\\]|\\\\.)*'|", "'[^']*'|", "a string with an escaped quote is not perturbed"),
+    ("guardrail/locks.py", "|true|false)(?=", "|true)(?=", "false is not perturbed"),
+    ("guardrail/locks.py", "\"123456\" if literal.replace(\"_\", \"\") == _NUMBER_SENTINEL else _NUMBER_SENTINEL", "_NUMBER_SENTINEL", "the sentinel replaces itself"),
+    ("guardrail/locks.py", "\"123456\" if literal.replace(\"_\", \"\") == _NUMBER_SENTINEL else _NUMBER_SENTINEL", "\"123456\" if literal == _NUMBER_SENTINEL else _NUMBER_SENTINEL", "the sentinel written with an underscore replaces itself"),
+    ("guardrail/locks.py", "\"false\" if literal == \"true\" else \"true\"", "\"true\"", "true is replaced by true"),
+    ("guardrail/locks.py", "literal[0] + _STRING_SENTINEL + literal[0]", "_STRING_SENTINEL", "a string loses its quotes when replaced"),
+    # --- globs ---
+    ("guardrail/core.py", "out.append(\"[^/]\")", "out.append(\".\")", "? crosses directories"),
+    ("guardrail/core.py", "out.append(\"[^/]*\")", "out.append(\".*\")", "* crosses directories"),
+    ("guardrail/core.py", "out.append(\".*\")", "out.append(\"[^/]*\")", "** does not cross directories"),
+    ("guardrail/core.py", "out.append(\"(?:.*/)?\")", "out.append(\".*/\")", "**/ needs a directory"),
+    ("guardrail/core.py", "out.append(re.escape(pattern[i]))", "out.append(pattern[i])", "a character of a glob is a regular expression"),
+    ("guardrail/core.py", "re.compile(\"^\" + \"\".join(out) + \"$\")", "re.compile(\"^\" + \"\".join(out))", "a glob matches the start of a path"),
+    ("guardrail/core.py", "            i += 3\n", "            i += 2\n", "**/ leaves its slash behind"),
+    ("guardrail/core.py", "return any(glob_to_regex(p).match(path) for p in patterns)", "return all(glob_to_regex(p).match(path) for p in patterns)", "a path must match every pattern"),
+    # --- the reader of a test report ---
+    ("guardrail/locks.py", "if not isinstance(test[\"status\"], str) or not isinstance(test[\"failureMessages\"], list):", "if not isinstance(test[\"failureMessages\"], list):", "a report whose status is not a string is read"),
+    ("guardrail/locks.py", "if not isinstance(test[\"status\"], str) or not isinstance(test[\"failureMessages\"], list):", "if not isinstance(test[\"status\"], str):", "a report whose failure messages are not a list is read"),
+    ("guardrail/locks.py", "if not all(isinstance(m, str) for m in test[\"failureMessages\"]):", "if False:", "a report whose failure message is not a string is read"),
+    # --- the rules of CLAUDE.md: Python 3.9 syntax and the standard library ---
+    ("guardrail/cli.py", "def main(argv: list[str] | None = None) -> int:\n    args", "def main(argv: list[str] | None = None) -> int:\n    match 1:\n        case 1:\n            pass\n    args", "syntax newer than Python 3.9"),
+    ("guardrail/locks.py", "import secrets\n", "import secrets\nimport yaml\n", "an import that is not the standard library"),
 ]
 
 
@@ -246,7 +293,7 @@ class LocksAreGuarded(unittest.TestCase):
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(mutated)
             result = subprocess.run(
-                [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_scenarios"],
+                [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_units", "tests.test_scenarios"],
                 cwd=snapshot,
                 env={**os.environ, "GUARDRAIL_HOME": tmp},
                 capture_output=True,
