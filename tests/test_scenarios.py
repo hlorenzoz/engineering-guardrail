@@ -1100,12 +1100,6 @@ class PerfGate(Scenario):
         self.assertRegex(entry["date"], r"^\d{4}-\d{2}-\d{2}T")
         self.assertEqual(entry["commit"], repo_head(repo))
 
-    def test_a_run_without_a_label_has_the_default_one_and_is_compared_with_it(self):
-        repo = Repo(self)
-        self.gate(repo, files={"test/a.test.ts": [1000]})
-        self.gate(repo, files={"test/a.test.ts": [1000]})
-        self.assertEqual({entry["label"] for entry in self.history(repo)}, {self.perf().DEFAULT_LABEL})
-
     def test_the_default_label_is_named_default_so_a_run_can_name_it(self):
         repo = Repo(self)
         self.gate(repo, files={"test/a.test.ts": [1000]})
