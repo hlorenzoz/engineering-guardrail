@@ -337,38 +337,73 @@ class FixNeedsTest(Scenario):
 
 
 class SizeCap(Scenario):
+    # A small cap of its own, so a case is a few lines and a few `git add` calls, and so that the
+    # tests state their boundaries relative to it. The values the lock ships with are one decision,
+    # pinned once by `test_the_defaults_are_eight_files_and_four_hundred_lines`.
+    CAP = {"files": 3, "lines": 12}
+
+    def repo(self):
+        return Repo(self, {**CONFIG, "sizeCap": self.CAP})
+
     def big(self, repo, files):
         for n in range(files):
             repo.stage(f"src/f{n}.ts", "export const v = 1\n")
         repo.stage("test/a.test.ts", "it('a', () => { expect(v).toBe(1) })\n")
 
-    def test_bites_over_the_file_cap(self):
-        repo = Repo(self)
-        self.big(repo, 9)
-        self.expect(repo.gate("feat: many\n"), 1, "9 production files and 9 changed lines (cap: 8 files, 400 lines)")
+    def long(self, repo, lines):
+        repo.stage("src/a.ts", "x\n" * lines)
+        repo.stage("test/a.test.ts", "it('a', () => { expect(v).toBe(1) })\n")
 
-    def test_stays_quiet_at_the_cap(self):
-        repo = Repo(self)
-        self.big(repo, 8)
+    def test_bites_over_the_file_cap(self):
+        repo = self.repo()
+        files = self.CAP["files"] + 1
+        self.big(repo, files)
+        self.expect(repo.gate("feat: many\n"), 1, f"{files} production files and {files} changed lines (cap: {self.CAP['files']} files, {self.CAP['lines']} lines)")
+
+    def test_stays_quiet_at_the_file_cap(self):
+        repo = self.repo()
+        self.big(repo, self.CAP["files"])
         self.expect(repo.gate("feat: many\n"), 0)
 
     def test_bites_over_the_line_cap(self):
-        repo = Repo(self)
-        repo.stage("src/a.ts", "x\n" * 401)
-        repo.stage("test/a.test.ts", "it('a', () => { expect(v).toBe(1) })\n")
-        self.expect(repo.gate("feat: long\n"), 1, "401 changed lines")
+        repo = self.repo()
+        lines = self.CAP["lines"] + 1
+        self.long(repo, lines)
+        self.expect(repo.gate("feat: long\n"), 1, f"{lines} changed lines")
+
+    def test_stays_quiet_at_the_line_cap(self):
+        repo = self.repo()
+        self.long(repo, self.CAP["lines"])
+        self.expect(repo.gate("feat: long\n"), 0)
 
     def test_tests_and_documents_do_not_count(self):
-        repo = Repo(self)
+        repo = self.repo()
         repo.stage("src/a.ts", "x\n")
-        repo.stage("test/a.test.ts", "y\n" * 900)
-        repo.stage("docs/a.md", "z\n" * 900)
+        repo.stage("test/a.test.ts", "y\n" * self.CAP["lines"] * 3)
+        repo.stage("docs/a.md", "z\n" * self.CAP["lines"] * 3)
         self.expect(repo.gate("feat: a\n"), 0)
 
     def test_hatch_opens_it(self):
-        repo = Repo(self)
-        self.big(repo, 9)
+        repo = self.repo()
+        self.big(repo, self.CAP["files"] + 1)
         self.expect(repo.gate("feat: many\n\nsize-ok: baseline of work done before the guardrail\n"), 0)
+
+    def test_the_defaults_are_eight_files_and_four_hundred_lines(self):
+        # The one place the numbers are written: a decision of the guardrail, which a project may override.
+        at_both = Repo(self)  # eight files of fifty lines: exactly at both caps
+        for n in range(8):
+            at_both.stage(f"src/f{n}.ts", "x\n" * 50)
+        at_both.stage("test/a.test.ts", "it('a', () => { expect(v).toBe(1) })\n")
+        self.expect(at_both.gate("feat: at the caps\n"), 0)
+        nine_files = Repo(self)
+        for n in range(9):
+            nine_files.stage(f"src/f{n}.ts", "x\n")
+        nine_files.stage("test/a.test.ts", "it('a', () => { expect(v).toBe(1) })\n")
+        self.expect(nine_files.gate("feat: many\n"), 1, "9 production files and 9 changed lines (cap: 8 files, 400 lines)")
+        long_file = Repo(self)
+        long_file.stage("src/a.ts", "x\n" * 401)
+        long_file.stage("test/a.test.ts", "it('a', () => { expect(v).toBe(1) })\n")
+        self.expect(long_file.gate("feat: long\n"), 1, "401 changed lines (cap: 8 files, 400 lines)")
 
 
 class CrossView(Scenario):

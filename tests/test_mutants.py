@@ -26,7 +26,10 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MUTANTS = [
     ("guardrail/locks.py", "if not production or any(config.is_test(p) for p in staged):", "if True:", "fix-needs-test never bites"),
     ("guardrail/locks.py", "if len(production) <= cap[\"files\"] and lines <= cap[\"lines\"]:", "if len(production) <= cap[\"files\"]:", "size cap ignores lines"),
-    ("guardrail/locks.py", "len(production) <= cap[\"files\"] and", "len(production) < cap[\"files\"] and", "size cap off by one"),
+    ("guardrail/locks.py", "len(production) <= cap[\"files\"] and", "len(production) < cap[\"files\"] and", "size cap off by one on files"),
+    ("guardrail/locks.py", "and lines <= cap[\"lines\"]:", "and lines < cap[\"lines\"]:", "size cap off by one on lines"),
+    ("guardrail/core.py", "\"sizeCap\": {\"files\": 8, \"lines\": 400},", "\"sizeCap\": {\"files\": 9, \"lines\": 400},", "the default size cap in files changed"),
+    ("guardrail/core.py", "\"sizeCap\": {\"files\": 8, \"lines\": 400},", "\"sizeCap\": {\"files\": 8, \"lines\": 401},", "the default size cap in lines changed"),
     ("guardrail/locks.py", "if not touched or any(core.matches(p, rule[\"tests\"]) for p in staged):", "if True:", "cross-view never bites"),
     ("guardrail/locks.py", "if not touched or settings[\"registry\"] in staged:", "if True:", "switch-on trigger never bites"),
     ("guardrail/locks.py", "if only_lines is not None and number not in only_lines:\n            continue\n        if _is_comment(line) or ALLOW_SKIP in line:", "if _is_comment(line) or ALLOW_SKIP in line:", "old skipped tests block new work"),
