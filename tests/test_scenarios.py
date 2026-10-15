@@ -233,6 +233,9 @@ class Repo:
         self.write(path, text)
         self.git("add", path)
 
+    def commit(self, message="test: more"):
+        self.git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message)
+
     def run(self, *args, env=None, home=None):
         # `home` is another copy of the code (see `broken_copy`); the default is the code under test.
         # A lock broken on purpose (test_mutants.py) can loop forever: the timeout turns that into a failure.
@@ -546,6 +549,50 @@ class LiveCitations(Scenario):
         repo = Repo(self)
         repo.stage("docs/a.md", "see `other-repo/src/a.ts:3`\n")
         self.expect(repo.run("staged"), 0, "1 citation(s) point outside this repository")
+
+    def test_the_citations_command_judges_every_tracked_document_and_not_only_the_staged_ones(self):
+        dead = Repo(self)
+        dead.stage("src/a.ts", "one\n")
+        dead.stage("docs/a.md", "see `src/gone.ts:1`\n")
+        dead.commit()  # nothing is staged any more
+        self.expect(dead.run("staged"), 0)
+        self.expect(dead.run("citations"), 1, "docs/a.md: line 1: src/gone.ts does not exist")
+        alive = Repo(self)
+        alive.stage("src/a.ts", "one\n")
+        alive.stage("docs/a.md", "see `src/a.ts:1` and `other-repo/src/a.ts:3`\n")
+        alive.commit()
+        self.expect(alive.run("citations"), 0, "1 citation(s) point outside this repository")
+
+    def test_only_the_citations_this_commit_adds_are_judged(self):
+        repo = Repo(self)
+        repo.stage("src/a.ts", "one\n")
+        repo.stage("docs/a.md", "old `src/gone.ts:1`\n")
+        repo.commit()
+        repo.stage("docs/a.md", "old `src/gone.ts:1`\nnew `src/gone2.ts:1`\n")
+        code, out = repo.run("staged")
+        self.assertEqual(code, 1, out)
+        self.assertIn("docs/a.md: line 2: src/gone2.ts does not exist", out)
+        self.assertNotIn("src/gone.ts", out)
+
+    def test_only_the_documents_the_project_names_are_judged(self):
+        repo = Repo(self, {**CONFIG, "citations": {"files": ["docs/**/*.md"]}})
+        repo.stage("src/a.ts", "one\n")
+        repo.stage("notes/a.md", "see `src/gone.ts:1`\n")
+        self.expect(repo.run("staged"), 0)
+        repo.stage("docs/a.md", "see `src/gone.ts:1`\n")
+        code, out = repo.run("staged")
+        self.assertEqual(code, 1, out)
+        self.assertIn("docs/a.md:", out)
+        self.assertNotIn("notes/a.md", out)
+
+    def test_a_range_is_judged_by_its_first_line(self):
+        repo = Repo(self)
+        repo.stage("src/a.ts", "one\n\nthree\n")
+        repo.stage("docs/a.md", "live `src/a.ts:1-3`, dead `src/a.ts:9-12`\n")
+        code, out = repo.run("staged")
+        self.assertEqual(code, 1, out)
+        self.assertIn("src/a.ts:9 is past the end (3 lines)", out)
+        self.assertEqual(out.count("BLOCKED"), 1, out)
 
 
 class Perturb(Scenario):

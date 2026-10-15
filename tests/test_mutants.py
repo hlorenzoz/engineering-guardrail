@@ -254,6 +254,14 @@ MUTANTS = [
     ("guardrail/locks.py", "if age > stale_days:", "if age >= stale_days:", "a check exactly at staleDays is old"),
     ("guardrail/locks.py", "if age > stale_days:", "if True:", "every check is old"),
     ("guardrail/locks.py", "if fields.get(\"Last check\", \"\").strip() and not last:", "if False:", "a Last check that is not a date is accepted"),
+    # --- citations: the whole-repository command, what a commit adds, the file filter, ranges, the usage ---
+    ("guardrail/locks.py", "if every_file:\n        paths = [", "if False:\n        paths = [", "the citations command judges only the staged files"),
+    ("guardrail/locks.py", "text, lines = core.staged_text(root, path), core.staged_added_lines(root, path)", "text, lines = core.staged_text(root, path), None", "a dead citation the commit did not add blocks it"),
+    ("guardrail/locks.py", "if only_lines is not None and number not in only_lines:\n            continue\n        for match in _CITATION.finditer(line):", "for match in _CITATION.finditer(line):", "every line of a document is judged for its citations"),
+    ("guardrail/locks.py", "if not core.matches(path, config[\"citations\"][\"files\"]):\n            continue", "if False:\n            continue", "a document outside citations.files is judged"),
+    ("guardrail/locks.py", "(\\d+)(?:-\\d+)?", "(\\d+)", "a citation of a range of lines is not read"),
+    ("guardrail/cli.py", "if command == \"citations\":", "if command == \"citationz\":", "the citations command does not exist"),
+    ("guardrail/cli.py", "return _report(command, problems, [f\"{unresolved} citation(s) point outside this repository\"])", "return _report(command, problems)", "the citations command hides what it could not judge"),
 ]
 
 
