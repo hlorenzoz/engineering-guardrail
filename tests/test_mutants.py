@@ -6,7 +6,7 @@ mutant that cannot be applied is a failure, because it proves nothing.
 
 The run works on a snapshot of the repository taken when it starts, so the code can be
 edited while it goes. A mutant stops at the first test that fails (that is a kill): the direct
-tests of tests/test_units.py first, which take milliseconds, then the scenarios.
+tests of tests/test_units.py and tests/test_schema.py first, which take milliseconds, then the scenarios.
 GUARDRAIL_MUTANTS=<text> runs only the mutants whose label or file contains the text
 (comma-separated for several); it is for the work in progress, never for a release.
 GUARDRAIL_MUTANT_WORKERS (default 3) is how many mutants run at once.
@@ -334,7 +334,7 @@ class LocksAreGuarded(unittest.TestCase):
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(mutated)
             result = subprocess.run(
-                [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_units", "tests.test_scenarios"],
+                [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_units", "tests.test_schema", "tests.test_scenarios"],
                 cwd=snapshot,
                 env={**os.environ, "GUARDRAIL_HOME": tmp},
                 capture_output=True,

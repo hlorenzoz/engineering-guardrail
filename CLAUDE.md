@@ -19,7 +19,8 @@ Operating guide for AI agents working in this repository: the shared git hooks
   a throwaway repository), and a mutant in `tests/test_mutants.py` that breaks the lock
   and is killed. A surviving mutant, or one that cannot be applied, fails the suite. A rule
   that is a table or a pure function (the fake-test patterns, the replaceable expected
-  values, a glob) is also tested directly in `tests/test_units.py`, one line per case; the
+  values, a glob, how migration SQL is read) is also tested directly in `tests/test_units.py` and
+  `tests/test_schema.py`, one line per case; the
   scenario stays, and a mutant of that rule may be killed by either.
 - **Check the message, not only the exit code.** A lock that blocks for the wrong reason
   is broken.
@@ -43,7 +44,7 @@ Operating guide for AI agents working in this repository: the shared git hooks
 | `guardrail/cli.py` | Commands, messages and exit codes |
 | `bin/guardrail` | The entry point the hooks call |
 | `.pre-commit-hooks.yaml` | The hooks offered to projects |
-| `tests/` | `test_units.py` (direct tests of the pure readers and of the 3.9 and standard-library rules), `test_scenarios.py` (through the command line) and `test_mutants.py` (`GUARDRAIL_MUTANTS=<text>` narrows a run while working); `log.sh` and the complete output of the last run of each (`tests_<name>.txt`, not versioned) |
+| `tests/` | `test_units.py` (direct tests of the pure readers and of the 3.9 and standard-library rules), `test_schema.py` (direct tests of the SQL reader, `guardrail/schema.py`), `test_scenarios.py` (through the command line) and `test_mutants.py` (`GUARDRAIL_MUTANTS=<text>` narrows a run while working); `log.sh` and the complete output of the last run of each (`tests_<name>.txt`, not versioned) |
 
 ## Releasing
 
