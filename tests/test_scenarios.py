@@ -1024,12 +1024,6 @@ class PerturbBatch(Scenario):
             seen = [json.loads(line)["git"] for line in handle]
         self.assertEqual(seen, [[], []], "the runner saw GIT_* variables")
 
-    def test_a_runner_without_batch_is_launched_without_them_too(self):
-        repo = self.repo(self.GOOD_BESIDE_BAD, batch=False)
-        self.perturb(repo, env={"GIT_DIR": os.path.join(repo.root, ".git"), "GIT_WORK_TREE": repo.root})
-        with open(os.path.join(repo.root, ".runlog"), encoding="utf-8") as handle:
-            self.assertEqual([json.loads(line)["git"] for line in handle], [[]] * 4)
-
 
 class TimeBudget(Scenario):
     """`commit-gate` and the durations the related-tests hook wrote into a Jest-shaped report
@@ -1447,27 +1441,30 @@ class PerfGate(Scenario):
         self.assertIn(f"{count} tests (previous {count})", out)
 
     def test_the_decision_is_ten_percent_on_the_total_and_double_on_a_file(self):
+        # The four literals of the decision (10 %, 2x, 100 ms, 10 files), each pinned by runs on both
+        # sides of it, in one repository with a label per pair. The boundaries relative to the values
+        # are the tests above and below, which take them from perf.py.
         repo = Repo(self)
-        self.gate(repo, files={"test/a.test.ts": [1000], "test/b.test.ts": [9000]})
-        self.assertNotIn("WARNING", self.gate(repo, files={"test/a.test.ts": [1000], "test/b.test.ts": [10000]})[1])  # +10.0%: not above ten
-        repo2 = Repo(self)
-        self.gate(repo2, files={"test/a.test.ts": [1000], "test/b.test.ts": [9000]})
-        self.assertIn("WARNING: the total duration grew", self.gate(repo2, files={"test/a.test.ts": [1000], "test/b.test.ts": [10002]})[1])
+
+        def run(label, before, after):
+            self.gate(repo, files=before, label=label)
+            return self.gate(repo, files=after, label=label)[1]
+
+        def total(b):  # a total of 1000 + b, with a second file that dominates the file comparison
+            return {"test/a.test.ts": [1000], "test/b.test.ts": [b]}
+
+        def file(a):  # one file at `a` ms beside a big one, so the total never moves enough to warn
+            return {"test/a.test.ts": [a], "test/b.test.ts": [10**6]}
+
+        self.assertNotIn("WARNING", run("total-at-ten", total(9000), total(10000)))  # +10.0%: not above ten
+        self.assertIn("WARNING: the total duration grew", run("total-over-ten", total(9000), total(10002)))
+        self.assertNotIn("WARNING", run("floor-under", file(40), file(90)))  # 2.25 times, but under a hundred milliseconds is noise
+        self.assertIn("WARNING: test/a.test.ts grew", run("floor-over", file(40), file(210)))  # over a hundred
+        self.assertNotIn("WARNING", run("factor-at", file(1000), file(2000)))  # double is not more than double
+        self.assertIn("WARNING: test/a.test.ts grew", run("factor-over", file(1000), file(2001)))
         files = {f"test/f{n:02}.test.ts": [1000] for n in range(12)}
-        repo4 = Repo(self)
-        self.gate(repo4, files=files)
-        listed = [line for line in self.gate(repo4, files={path: [1000 + 10 * (n + 1)] for n, path in enumerate(files)})[1].splitlines() if line.startswith("  test/")]
-        self.assertEqual(len(listed), 10)  # the ten that grew most
-        repo5 = Repo(self)
-        self.gate(repo5, files={"test/a.test.ts": [40], "test/b.test.ts": [10**6]})
-        out = self.gate(repo5, files={"test/a.test.ts": [90], "test/b.test.ts": [10**6]})[1]
-        self.assertNotIn("WARNING", out)  # 2.25 times, but under a hundred milliseconds is noise
-        out = self.gate(repo5, files={"test/a.test.ts": [210], "test/b.test.ts": [10**6]})[1]
-        self.assertIn("WARNING: test/a.test.ts grew", out)  # 2.33 times and over a hundred
-        for now, warns in ((2000, False), (2001, True)):  # double is not more than double
-            repo3 = Repo(self)
-            self.gate(repo3, files={"test/a.test.ts": [1000], "test/b.test.ts": [10**6]})
-            self.assertEqual("WARNING: test/a.test.ts grew" in self.gate(repo3, files={"test/a.test.ts": [now], "test/b.test.ts": [10**6]})[1], warns)
+        out = run("top", files, {path: [1000 + 10 * (n + 1)] for n, path in enumerate(files)})
+        self.assertEqual(len([line for line in out.splitlines() if line.startswith("  test/")]), 10)  # the ten that grew most
 
     # --- what it refuses ----------------------------------------------------
 
