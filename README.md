@@ -64,6 +64,17 @@ block new work.
    }
    ```
 
+   **The type of each key is checked (v0.4.0).** A key of the wrong type is a configuration error: exit 2,
+   `guardrail <command>: cannot look, so it does not pass: .guardrail.json: <key path> must be <type>`, for
+   example `production must be a list of strings`, `sizeCap.lines must be a whole number` (a boolean or a
+   fraction is not one), `crossView[0].tests must be a list of strings` or
+   `perturb.runners[0].command must be a string or null`. A file that is not an object is refused the same
+   way. Before, `"production": "src/**"` was read one letter at a time and the no-test lock never bit, and
+   `"sizeCap": 5` ended in a traceback. A rule of `crossView` needs `paths` and `tests`, a runner needs
+   `files` and `command` (`null` declares its suite not runnable). `timeBudget`, `fkIndex` and a runner's
+   `batch` keep their own validation where they are used. This is stricter than v0.3.0, so a project moving
+   from it may meet a refusal for a configuration that used to pass in silence.
+
 3. Run `pre-commit install`.
 
 ## Escape hatches
@@ -388,3 +399,8 @@ by running the scenarios with a 3.9 `python3` first in the `PATH`. The parse cov
 scenarios start the guardrail as `python3`, so they test the interpreter that comes first in the
 `PATH`, not the one that runs them: to test 3.9, put a directory whose `python3` is 3.9 first.
 Release by tagging; projects move to the new version by changing `rev`.
+
+A command handed a file it cannot read (`selfcheck` without `.pre-commit-config.yaml`, `commit-gate` with a
+message file that is missing or is a folder) says `cannot look, so it does not pass` and names the file: exit 2,
+no traceback. It blocked before too, with exit 1 and a traceback; only the code and the message changed (a patch
+change, v0.4.0 carries it).
