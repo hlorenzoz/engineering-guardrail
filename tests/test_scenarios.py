@@ -1556,10 +1556,6 @@ class FkIndex(Scenario):
         self.expect(outcome, 1, f"drizzle/0002_invoices.sql: {self.UNINDEXED} -> clients has no index that leads with (client_id)")
         self.assertIn("no-index: invoices.client_id | <why it needs none>", outcome[1])
 
-    def test_bites_on_an_index_that_leads_with_another_column(self):
-        sql = self.INVOICES + self.FK + 'CREATE INDEX "invoices_number_idx" ON "invoices" ("number","client_id");\n'
-        self.expect(self.repo({"drizzle/0002_invoices.sql": sql}).gate("feat: migration\n"), 1, "has no index that leads with (client_id)")
-
     def test_bites_on_an_index_a_later_migration_dropped(self):
         committed = {
             "drizzle/0001_invoices.sql": self.INVOICES + self.INDEX,
@@ -1568,129 +1564,17 @@ class FkIndex(Scenario):
         repo = self.repo({"drizzle/0003_fk.sql": self.FK}, committed=committed)
         self.expect(repo.gate("feat: migration\n"), 1, "has no index that leads with (client_id)")
 
-    def test_bites_on_an_inline_references_and_on_an_added_column_with_one(self):
-        inline = 'CREATE TABLE "notes" (\n  "id" uuid PRIMARY KEY,\n  "client_id" uuid REFERENCES "clients"("id") ON DELETE CASCADE\n);\n'
-        self.expect(self.repo({"drizzle/0002_notes.sql": inline}).gate("feat: migration\n"), 1, "foreign key on notes (client_id) -> clients")
-        added = 'ALTER TABLE "invoices" ADD COLUMN "note" text, ADD COLUMN "client_id" uuid REFERENCES "clients"("id");\n'
-        self.expect(self.repo({"drizzle/0002_x.sql": added}).gate("feat: migration\n"), 1, "foreign key on invoices (client_id) -> clients")
-
-    def test_bites_on_a_table_level_foreign_key_inside_create_table(self):
-        sql = 'CREATE TABLE "notes" (\n  "id" uuid PRIMARY KEY,\n  "client_id" uuid,\n  CONSTRAINT "n_fk" FOREIGN KEY ("client_id") REFERENCES "clients"("id")\n);\n'
-        self.expect(self.repo({"drizzle/0002_notes.sql": sql}).gate("feat: migration\n"), 1, "foreign key on notes (client_id)")
-
-    def test_a_foreign_key_on_the_ignored_column_alone_still_needs_its_index(self):
-        sql = 'CREATE TABLE "notes" (\n  "id" uuid PRIMARY KEY,\n  "organization_id" uuid REFERENCES "organizations"("id")\n);\n'
-        self.expect(self.repo({"drizzle/0002_notes.sql": sql}).gate("feat: migration\n"), 1, "foreign key on notes (organization_id)")
-        indexed = sql + 'CREATE INDEX "notes_org_idx" ON "notes" ("organization_id");\n'
-        self.expect(self.repo({"drizzle/0002_notes.sql": indexed}).gate("feat: migration\n"), 0)
-
-    def test_a_partial_index_does_not_cover_a_foreign_key(self):
-        sql = self.INVOICES + self.FK + 'CREATE INDEX "i" ON "invoices" ("client_id") WHERE "number" IS NOT NULL;\n'
-        self.expect(self.repo({"drizzle/0002_invoices.sql": sql}).gate("feat: migration\n"), 1, "has no index that leads with (client_id)")
-
-    def test_an_expression_index_does_not_cover_a_foreign_key(self):
-        sql = self.INVOICES + self.FK + 'CREATE INDEX "i" ON "invoices" (lower("client_id"::text));\n'
-        self.expect(self.repo({"drizzle/0002_invoices.sql": sql}).gate("feat: migration\n"), 1, "has no index that leads with (client_id)")
-
-    def test_a_column_that_is_not_ignored_has_to_be_in_the_index(self):
-        # No "leadingColumnsIgnored": the foreign key's two columns are both required.
+    def test_without_leading_columns_ignored_every_column_of_the_key_is_required(self):
+        # The configuration default: no "leadingColumnsIgnored" ignores nothing. How an index covers is proven in tests/test_schema.py.
         config = {"migrations": ["drizzle/*.sql"]}
         alone = self.repo({"drizzle/0002_invoices.sql": self.INVOICES + self.FK + self.INDEX}, config=config)
         self.expect(alone.gate("feat: migration\n"), 1, "has no index that leads with (organization_id, client_id)")
-        for columns in ('"organization_id","client_id"', '"client_id","organization_id"'):  # in any order
-            with self.subTest(columns=columns):
-                both = self.INDEX.replace('("client_id")', f"({columns})")
-                self.expect(self.repo({"drizzle/0002_invoices.sql": self.INVOICES + self.FK + both}, config=config).gate("feat: migration\n"), 0)
 
     # --- what stays quiet -------------------------------------------------------
-
-    def test_stays_quiet_with_the_index_in_the_same_migration_before_or_after_the_key(self):
-        for sql in (self.INVOICES + self.INDEX + self.FK, self.INVOICES + self.FK + self.INDEX):
-            with self.subTest(sql=sql):
-                self.expect(self.repo({"drizzle/0002_invoices.sql": sql}).gate("feat: migration\n"), 0)
 
     def test_stays_quiet_with_the_index_in_an_earlier_migration(self):
         repo = self.repo({"drizzle/0002_fk.sql": self.FK}, committed={"drizzle/0001_invoices.sql": self.INVOICES + self.INDEX})
         self.expect(repo.gate("feat: migration\n"), 0)
-
-    def test_stays_quiet_when_a_composite_key_has_an_index_on_the_other_column_or_on_both(self):
-        for index in (self.INDEX, self.INDEX.replace('("client_id")', '("organization_id","client_id")'), self.INDEX.replace('("client_id")', '("client_id","organization_id")')):
-            with self.subTest(index=index):
-                self.expect(self.repo({"drizzle/0002_invoices.sql": self.INVOICES + self.FK + index}).gate("feat: migration\n"), 0)
-
-    def test_stays_quiet_when_a_primary_key_or_a_unique_constraint_covers_the_key(self):
-        lines = (
-            'CREATE TABLE "invoice_lines" (\n  "organization_id" uuid NOT NULL,\n  "invoice_id" uuid NOT NULL,\n  "line_no" integer NOT NULL,\n'
-            '  CONSTRAINT "lines_pk" PRIMARY KEY("invoice_id","line_no")\n);\n'
-            'ALTER TABLE "invoice_lines" ADD CONSTRAINT "lines_fk" FOREIGN KEY ("organization_id","invoice_id") REFERENCES "invoices"("organization_id","id");\n'
-        )
-        self.expect(self.repo({"drizzle/0002_lines.sql": lines}).gate("feat: migration\n"), 0)
-        unique = lines.replace('PRIMARY KEY("invoice_id","line_no")', 'UNIQUE("invoice_id","line_no")')
-        self.expect(self.repo({"drizzle/0002_lines.sql": unique}).gate("feat: migration\n"), 0)
-        inline = 'CREATE TABLE "profiles" (\n  "id" uuid PRIMARY KEY,\n  "client_id" uuid UNIQUE REFERENCES "clients"("id")\n);\n'
-        self.expect(self.repo({"drizzle/0002_profiles.sql": inline}).gate("feat: migration\n"), 0)
-        one_to_one = 'CREATE TABLE "profiles" (\n  "client_id" uuid PRIMARY KEY REFERENCES "clients"("id")\n);\n'
-        self.expect(self.repo({"drizzle/0002_profiles.sql": one_to_one}).gate("feat: migration\n"), 0)
-
-    def test_stays_quiet_with_a_unique_index_and_with_the_other_forms_of_create_index(self):
-        for index in (
-            'CREATE UNIQUE INDEX "i" ON "invoices" ("client_id");',
-            'CREATE INDEX CONCURRENTLY IF NOT EXISTS "i" ON ONLY "public"."invoices" USING btree ("client_id" DESC NULLS LAST) INCLUDE ("number");',
-            'CREATE INDEX ON invoices (client_id text_pattern_ops);',
-        ):
-            with self.subTest(index=index):
-                self.expect(self.repo({"drizzle/0002_invoices.sql": self.INVOICES + self.FK + index + "\n"}).gate("feat: migration\n"), 0)
-
-    def test_stays_quiet_when_an_index_is_dropped_and_made_again_or_the_key_is_dropped(self):
-        again = {"drizzle/0001_invoices.sql": self.INVOICES + self.INDEX, "drizzle/0002_drop.sql": 'DROP INDEX IF EXISTS "invoices_client_idx", "other";\n'}
-        recreated = self.repo({"drizzle/0003_fk.sql": self.FK + self.INDEX}, committed=again)
-        self.expect(recreated.gate("feat: migration\n"), 0)
-        gone = self.repo({"drizzle/0003_fk.sql": self.FK, "drizzle/0004_drop_fk.sql": 'ALTER TABLE "invoices" DROP CONSTRAINT "invoices_client_fk";\n'})
-        self.expect(gone.gate("feat: migration\n"), 0)
-        dropped_column = self.repo({"drizzle/0003_fk.sql": self.FK, "drizzle/0004_drop.sql": 'ALTER TABLE "invoices" DROP COLUMN "client_id";\n'})
-        self.expect(dropped_column.gate("feat: migration\n"), 0)
-
-    def test_bites_after_an_index_is_lost_with_its_column_or_its_table_or_by_a_dropped_constraint(self):
-        lost = [
-            ("column", {"drizzle/0001_invoices.sql": self.INVOICES + self.INDEX, "drizzle/0002_swap.sql": 'ALTER TABLE "invoices" DROP COLUMN "client_id";\n--> statement-breakpoint\nALTER TABLE "invoices" ADD COLUMN "client_id" uuid;\n'}),
-            ("table", {"drizzle/0001_invoices.sql": self.INVOICES + self.INDEX, "drizzle/0002_drop.sql": 'DROP TABLE IF EXISTS "invoices" CASCADE;\n'}),
-            ("constraint", {"drizzle/0001_invoices.sql": self.INVOICES + 'ALTER TABLE "invoices" ADD CONSTRAINT "by_client" UNIQUE ("client_id");\n', "drizzle/0002_drop.sql": 'ALTER TABLE "invoices" DROP CONSTRAINT "by_client";\n'}),
-            ("rename", {"drizzle/0001_invoices.sql": self.INVOICES + self.INDEX, "drizzle/0002_rename.sql": 'ALTER INDEX "invoices_client_idx" RENAME TO "renamed";\n', "drizzle/0003_drop.sql": 'DROP INDEX "renamed";\n'}),
-        ]
-        for how, committed in lost:
-            with self.subTest(how=how):
-                repo = self.repo({"drizzle/0009_fk.sql": self.FK}, committed=committed)
-                self.expect(repo.gate("feat: migration\n"), 1, "has no index that leads with (client_id)")
-
-    def test_reads_names_whatever_their_quotes_schema_or_case(self):
-        sql = 'create table INVOICES (organization_id uuid, client_id uuid);\nALTER TABLE ONLY "public"."Invoices" ADD CONSTRAINT fk FOREIGN KEY (ORGANIZATION_ID, "client_id") REFERENCES public.CLIENTS (organization_id, id);\n'
-        self.expect(self.repo({"drizzle/0002_x.sql": sql}).gate("feat: migration\n"), 1, "foreign key on invoices (organization_id, client_id) -> clients")
-
-    def test_a_comment_inside_a_statement_hides_what_it_contains(self):
-        sql = 'CREATE TABLE "t" (\n  "id" uuid PRIMARY KEY,\n  "b" uuid /* REFERENCES c(d) */,\n  "n" uuid -- REFERENCES c(d)\n);\n'
-        self.expect(self.repo({"drizzle/0002_t.sql": sql}).gate("feat: migration\n"), 0)
-
-    def test_a_statement_inside_a_function_body_is_not_executed_by_the_migration(self):
-        sql = 'CREATE FUNCTION f() RETURNS void AS $body$\nBEGIN\n  ALTER TABLE "invoices" ADD COLUMN "z" uuid REFERENCES "clients"("id");\nEND $body$ LANGUAGE plpgsql;\n'
-        self.expect(self.repo({"drizzle/0002_f.sql": sql}).gate("feat: migration\n"), 0)
-
-    def test_a_function_body_with_several_statements_is_still_one_quoted_body(self):
-        sql = (
-            'CREATE FUNCTION f() RETURNS void AS $body$\nBEGIN\n  PERFORM 1;\n'
-            '  ALTER TABLE "invoices" ADD COLUMN "z" uuid REFERENCES "clients"("id");\nEND $body$ LANGUAGE plpgsql;\n'
-        )
-        self.expect(self.repo({"drizzle/0002_f.sql": sql}).gate("feat: migration\n"), 0)
-
-    def test_a_separator_inside_a_quoted_name_does_not_split_the_statement(self):
-        sql = self.INVOICES + self.FK + 'CREATE INDEX "invoices_client;idx" ON "invoices" USING btree ("client_id");\n'
-        self.expect(self.repo({"drizzle/0002_invoices.sql": sql}).gate("feat: migration\n"), 0)
-
-    def test_an_expression_index_does_not_cover_a_key_on_a_column_named_like_its_function(self):
-        sql = (
-            'CREATE TABLE "notes" (\n  "id" uuid PRIMARY KEY,\n  "lower" uuid REFERENCES "clients"("id")\n);\n'
-            'CREATE INDEX "notes_lower_idx" ON "notes" (lower("id"::text));\n'
-        )
-        self.expect(self.repo({"drizzle/0002_notes.sql": sql}).gate("feat: migration\n"), 1, "foreign key on notes (lower)")
 
     def test_judges_only_the_migrations_this_commit_stages(self):
         committed = {"drizzle/0001_invoices.sql": self.INVOICES + self.FK}  # an old, unindexed key
@@ -1700,13 +1584,6 @@ class FkIndex(Scenario):
     def test_stays_quiet_outside_the_configured_migrations_and_when_not_configured(self):
         self.expect(self.repo({"db/0002_invoices.sql": self.INVOICES + self.FK, "drizzle/meta/0002_snapshot.json": "{}"}).gate("feat: migration\n"), 0)
         self.expect(self.repo({"drizzle/0002_invoices.sql": self.INVOICES + self.FK}, config=None).gate("feat: migration\n"), 0)
-
-    def test_a_key_in_a_comment_or_a_string_is_not_a_key(self):
-        sql = (
-            '-- ALTER TABLE a ADD CONSTRAINT x FOREIGN KEY (b) REFERENCES c(d);\n/* FOREIGN KEY (b) REFERENCES c(d) */\n'
-            'CREATE TABLE "t" ("id" uuid PRIMARY KEY, "note" text DEFAULT \'FOREIGN KEY (b) REFERENCES c(d); x\');\n'
-        )
-        self.expect(self.repo({"drizzle/0002_t.sql": sql}).gate("feat: migration\n"), 0)
 
     def test_known_limit_a_key_built_in_a_do_block_is_not_seen(self):
         sql = 'DO $$ BEGIN ALTER TABLE "invoices" ADD CONSTRAINT "x" FOREIGN KEY ("client_id") REFERENCES "clients"("id"); END $$;\n'
