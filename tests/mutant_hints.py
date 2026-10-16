@@ -242,4 +242,9 @@ HINTS = {
     "the no-perturb hatch is renamed": "tests.test_scenarios.Perturb.test_the_hatch_leaves_an_assertion_out_and_it_is_the_hatch_that_does",
     "a staged file that is not a test is perturbed": "tests.test_scenarios.Perturb.test_a_staged_file_that_is_not_a_test_and_a_test_with_nothing_to_replace_are_not_run",
     "a test with nothing to perturb is run": "tests.test_scenarios.Perturb.test_a_staged_file_that_is_not_a_test_and_a_test_with_nothing_to_replace_are_not_run",
+    "a boolean is a whole number": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
+    "a fraction is a whole number": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
+    "a list of anything is a list of strings": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
+    "the shape of a key is not checked": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
+    "a refusal does not name the key": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
 }

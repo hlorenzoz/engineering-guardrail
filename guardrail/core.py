@@ -64,14 +64,92 @@ def matches(path: str, patterns) -> bool:
     return any(glob_to_regex(p).match(path) for p in patterns)
 
 
+def _is_strings(value) -> bool:
+    """A list whose every item is a string (an empty list is one)."""
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_count(value) -> bool:
+    """A whole number. A boolean is not one, although Python counts it as an int."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+# What a plain value must be, with the phrase the refusal uses for it.
+_LEAVES = {
+    "strings": (_is_strings, "a list of strings"),
+    "count": (_is_count, "a whole number"),
+    "string": (lambda value: isinstance(value, str), "a string"),
+    "string or null": (lambda value: value is None or isinstance(value, str), "a string or null"),
+}
+
+# The shape of each key of the file. A leaf is a name of _LEAVES; ("object", fields, required) is an
+# object and ("objects", fields, required) a list of them. `fields` maps a field to a leaf and
+# `required` names the fields that must be there (the others fall back to the defaults). A field
+# that is not listed is not judged: `timeBudget` and `fkIndex` are validated where they are used
+# (guardrail/locks.py), and a runner's `batch` too.
+_SHAPES = {
+    "production": "strings",
+    "tests": "strings",
+    "ignore": "strings",
+    "sizeCap": ("object", {"files": "count", "lines": "count"}, ()),
+    "crossView": ("objects", {"name": "string", "paths": "strings", "tests": "strings"}, ("paths", "tests")),
+    "perturb": ("object", {"max": "count", "timeoutSeconds": "count", "runners": "runners"}, ()),
+    "citations": ("object", {"files": "strings"}, ()),
+    "switchedOn": ("object", {"registry": "string", "triggers": "strings", "staleDays": "count"}, ()),
+}
+# The runners of `perturb` are a list of objects of their own.
+_RUNNERS = ("objects", {"files": "string", "command": "string or null"}, ("files", "command"))
+
+
+def _refuse(path: str, expected: str):
+    """A key of the wrong type: say which key and what it must be. Never read as it stands."""
+    raise GuardrailError(f"{CONFIG_FILE}: {path} must be {expected}")
+
+
+def _check_node(path: str, value, shape) -> None:
+    """Refuse `value` unless it has `shape`; `path` names it in the message (`crossView[0].tests`)."""
+    if isinstance(shape, str):
+        valid, expected = _LEAVES[shape]
+        if not valid(value):
+            _refuse(path, expected)
+        return
+    kind, fields, required = shape
+    if kind == "object":
+        if not isinstance(value, dict):
+            _refuse(path, "an object")
+        found = [(path, value)]
+    else:
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            _refuse(path, "a list of objects")
+        found = [(f"{path}[{index}]", item) for index, item in enumerate(value)]
+    for where, item in found:
+        for field, leaf in fields.items():
+            if field in item:
+                _check_node(f"{where}.{field}", item[field], _RUNNERS if leaf == "runners" else leaf)
+            elif field in required:
+                _refuse(f"{where}.{field}", _LEAVES[leaf][1])
+
+
+def _check_shape(key: str, value) -> None:
+    """Refuse a key of `.guardrail.json` whose value has the wrong type. A list of globs written as
+    a string would be read one letter at a time, and a number where an object goes ends in a traceback."""
+    if key in _SHAPES:
+        _check_node(key, value, _SHAPES[key])
+
+
 class Config:
     """The project's guardrail settings, with defaults for whatever it leaves out."""
 
     def __init__(self, data: dict | None = None):
         merged = json.loads(json.dumps(DEFAULTS))
-        for key, value in (data or {}).items():
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise GuardrailError(f"{CONFIG_FILE} must be an object")
+        for key, value in data.items():
             if key not in DEFAULTS:
                 raise GuardrailError(f"{CONFIG_FILE}: unknown key '{key}'")
+            _check_shape(key, value)
             if isinstance(merged[key], dict):
                 merged[key].update(value)
             else:

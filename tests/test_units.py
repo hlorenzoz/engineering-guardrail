@@ -271,6 +271,106 @@ class Globs(unittest.TestCase):
         self.assertFalse(core.matches("src/a.ts", []))
 
 
+class ConfigShape(unittest.TestCase):
+    """`Config`: a key of the wrong type is refused, naming the key and the type it expects.
+
+    Without it, `"production": "src/**"` is read one letter at a time and the lock never bites, and
+    `"sizeCap": 5` ends in a traceback. `timeBudget` and `fkIndex` keep their own validation in
+    `guardrail/locks.py`; the configuration leaves them to it."""
+
+    # (what the file holds, the key it is refused for, what that key must be)
+    WRONG = [
+        ({"production": "src/**"}, "production", "a list of strings"),
+        ({"production": ["src/**", 3]}, "production", "a list of strings"),
+        ({"production": None}, "production", "a list of strings"),
+        ({"tests": "test/**"}, "tests", "a list of strings"),
+        ({"tests": {"a": "test/**"}}, "tests", "a list of strings"),
+        ({"ignore": "dist/**"}, "ignore", "a list of strings"),
+        ({"ignore": [["dist/**"]]}, "ignore", "a list of strings"),
+        ({"sizeCap": 5}, "sizeCap", "an object"),
+        ({"sizeCap": "5"}, "sizeCap", "an object"),
+        ({"sizeCap": [8, 400]}, "sizeCap", "an object"),
+        ({"sizeCap": {"files": "8"}}, "sizeCap.files", "a whole number"),
+        ({"sizeCap": {"files": 8.5}}, "sizeCap.files", "a whole number"),
+        ({"sizeCap": {"files": True}}, "sizeCap.files", "a whole number"),
+        ({"sizeCap": {"lines": None}}, "sizeCap.lines", "a whole number"),
+        ({"crossView": {"paths": ["a/**"], "tests": ["t/**"]}}, "crossView", "a list of objects"),
+        ({"crossView": ["a/**"]}, "crossView", "a list of objects"),
+        ({"crossView": [{"paths": "a/**", "tests": ["t/**"]}]}, "crossView[0].paths", "a list of strings"),
+        ({"crossView": [{"paths": ["a/**"]}]}, "crossView[0].tests", "a list of strings"),
+        ({"crossView": [{"paths": ["a/**"], "tests": ["t/**"], "name": 5}]}, "crossView[0].name", "a string"),
+        ({"crossView": [{"paths": ["a/**"], "tests": ["t/**"]}, {"paths": 1, "tests": []}]}, "crossView[1].paths", "a list of strings"),
+        ({"perturb": []}, "perturb", "an object"),
+        ({"perturb": {"runners": "python3 {file}"}}, "perturb.runners", "a list of objects"),
+        ({"perturb": {"runners": ["python3 {file}"]}}, "perturb.runners", "a list of objects"),
+        ({"perturb": {"runners": [{"files": 1, "command": "python3 {file}"}]}}, "perturb.runners[0].files", "a string"),
+        ({"perturb": {"runners": [{"command": "python3 {file}"}]}}, "perturb.runners[0].files", "a string"),
+        ({"perturb": {"runners": [{"files": "t/**", "command": 5}]}}, "perturb.runners[0].command", "a string or null"),
+        ({"perturb": {"runners": [{"files": "t/**"}]}}, "perturb.runners[0].command", "a string or null"),
+        ({"perturb": {"runners": [{"files": "t/**", "command": None}, {"files": "e/**", "command": []}]}}, "perturb.runners[1].command", "a string or null"),
+        ({"perturb": {"max": "12"}}, "perturb.max", "a whole number"),
+        ({"perturb": {"timeoutSeconds": True}}, "perturb.timeoutSeconds", "a whole number"),
+        ({"citations": "**/*.md"}, "citations", "an object"),
+        ({"citations": {"files": "**/*.md"}}, "citations.files", "a list of strings"),
+        ({"switchedOn": 1}, "switchedOn", "an object"),
+        ({"switchedOn": {"registry": 3}}, "switchedOn.registry", "a string"),
+        ({"switchedOn": {"triggers": "drizzle/*.sql"}}, "switchedOn.triggers", "a list of strings"),
+        ({"switchedOn": {"staleDays": "30"}}, "switchedOn.staleDays", "a whole number"),
+    ]
+
+    # Every key with the shape it must have, including the ones that look odd but are allowed: a runner
+    # that declares its suite not runnable (`command: null`), a batch block (judged where it is used),
+    # an empty list, a rule without a name, a count of zero.
+    VALID = {
+        "production": ["lib/**"],
+        "tests": [],
+        "ignore": ["lib/generated/**"],
+        "sizeCap": {"files": 3, "lines": 12},
+        "crossView": [{"name": "billing", "paths": ["a/**"], "tests": ["t/**"]}, {"paths": [], "tests": []}],
+        "perturb": {
+            "runners": [{"files": "t/**", "command": "run {file}", "batch": {"args": 3}}, {"files": "e/**", "command": None}],
+            "max": 1,
+            "timeoutSeconds": 9,
+        },
+        "citations": {"files": []},
+        "switchedOn": {"registry": "registry.md", "triggers": [], "staleDays": 0},
+        "timeBudget": {"report": "report.json", "format": "jest-json"},
+        "fkIndex": {"migrations": ["migrations/*.sql"]},
+    }
+
+    def refusal(self, data):
+        with self.assertRaises(core.GuardrailError) as raised:
+            core.Config(data)
+        return str(raised.exception)
+
+    def test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects(self):
+        for data, key, expected in self.WRONG:
+            with self.subTest(data=data):
+                message = self.refusal(data)
+                self.assertIn(f"{key} must be {expected}", message)
+                self.assertIn(core.CONFIG_FILE, message)
+
+    def test_every_key_of_the_right_type_is_accepted_and_kept_as_given(self):
+        config = core.Config(self.VALID)
+        for key, value in self.VALID.items():
+            with self.subTest(key=key):
+                self.assertEqual(config[key], value)
+
+    def test_a_partial_object_keeps_the_defaults_of_the_keys_it_leaves_out(self):
+        config = core.Config({"sizeCap": {"files": 3}, "perturb": {"max": 2}, "switchedOn": {"triggers": ["x/**"]}})
+        self.assertEqual(config["sizeCap"], {"files": 3, "lines": core.DEFAULTS["sizeCap"]["lines"]})
+        self.assertEqual(config["perturb"]["timeoutSeconds"], core.DEFAULTS["perturb"]["timeoutSeconds"])
+        self.assertEqual(config["switchedOn"]["staleDays"], core.DEFAULTS["switchedOn"]["staleDays"])
+
+    def test_no_configuration_and_an_empty_one_are_the_defaults(self):
+        for data in (None, {}):
+            with self.subTest(data=data):
+                self.assertEqual(core.Config(data).data, core.DEFAULTS)
+
+    def test_an_unknown_key_is_still_refused_by_name(self):
+        self.assertIn("unknown key 'productoin'", self.refusal({"productoin": ["src/**"]}))
+
+
 class ReportReader(unittest.TestCase):
     """`read_jest_report`: a report that is not of the shape it reads proves nothing (None)."""
 

@@ -1709,5 +1709,65 @@ class Wiring(Scenario):
         self.assertIn("cannot look, so it does not pass", result.stderr)
 
 
+class ConfigTypes(Scenario):
+    """A `.guardrail.json` with a key of the wrong type cannot be used, so the lock does not pass: exit 2,
+    naming the key and the type it expects. The table of every key is in `tests/test_units.py`."""
+
+    def test_a_production_glob_written_as_a_string_is_refused_and_not_read_letter_by_letter(self):
+        # Read one letter at a time, "src/**" matches no file and a fix with no test went through in silence.
+        repo = Repo(self, {**CONFIG, "production": "src/**"})
+        repo.stage("src/a.ts", "export const a = 1\n")
+        self.expect(repo.gate("fix: a\n"), 2, "production must be a list of strings")
+
+    def test_each_wrong_shape_is_an_error_from_every_command_that_reads_the_configuration(self):
+        shapes = [
+            ({"sizeCap": 5}, "sizeCap must be an object"),
+            ({"sizeCap": {"lines": "400"}}, "sizeCap.lines must be a whole number"),
+            ({"crossView": [{"paths": ["src/billing/**"]}]}, "crossView[0].tests must be a list of strings"),
+            ({"perturb": {"max": "12"}}, "perturb.max must be a whole number"),
+            ({"perturb": {"runners": [{"files": "test/**"}]}}, "perturb.runners[0].command must be a string or null"),
+            ({"switchedOn": {"staleDays": "30"}}, "switchedOn.staleDays must be a whole number"),
+            ({"citations": {"files": "**/*.md"}}, "citations.files must be a list of strings"),
+        ]
+        for wrong, text in shapes:
+            for args in (("staged",), ("perturb",), ("citations",), ("selfcheck",)):
+                with self.subTest(config=wrong, command=args[0]):
+                    repo = Repo(self, {**CONFIG, **wrong})
+                    code, out = repo.run(*args)
+                    self.assertEqual(code, 2, out)
+                    self.assertIn(text, out)
+                    self.assertIn("cannot look, so it does not pass", out)
+                    self.assertNotIn("Traceback", out)
+            with self.subTest(config=wrong, command="commit-gate"):
+                self.expect(Repo(self, {**CONFIG, **wrong}).gate("fix: a\n"), 2, text)
+
+    def test_a_file_that_is_not_an_object_is_refused(self):
+        for text in ("[]", "\"yes\"", "5"):
+            with self.subTest(text=text):
+                repo = Repo(self)
+                repo.write(".guardrail.json", text)
+                code, out = repo.run("staged")
+                self.assertEqual(code, 2, out)
+                self.assertIn("must be an object", out)
+                self.assertIn("cannot look, so it does not pass", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_a_configuration_with_every_key_of_the_right_type_is_used(self):
+        # Quiet: the right shapes, odd ones allowed included, are not refused and the locks still bite.
+        config = {
+            **CONFIG,
+            "tests": ["test/**"],
+            "ignore": ["dist/**"],
+            "sizeCap": {"files": 3},
+            "citations": {"files": ["docs/**/*.md"]},
+            "perturb": {"runners": [{"files": "test/**", "command": "python3 {file}"}, {"files": "e2e/**", "command": None}], "max": 2, "timeoutSeconds": 60},
+            "switchedOn": {"registry": ".agents/SWITCHED_ON.md", "triggers": ["migrations/**"], "staleDays": 0},
+        }
+        repo = Repo(self, config)
+        self.expect(repo.run("staged"), 0)
+        repo.stage("src/a.ts", "export const a = 1\n")
+        self.expect(repo.gate("fix: a\n"), 1, "production file(s) staged and no test")
+
+
 if __name__ == "__main__":
     unittest.main()

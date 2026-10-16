@@ -285,6 +285,12 @@ MUTANTS = [
     ("guardrail/locks.py", "NO_PERTURB = \"guardrail: no-perturb\"", "NO_PERTURB = \"guardrail: no-perturb!\"", "the no-perturb hatch is renamed"),
     ("guardrail/locks.py", "if not config.is_test(path):\n            continue\n        sites =", "if False:\n            continue\n        sites =", "a staged file that is not a test is perturbed"),
     ("guardrail/locks.py", "if not sites:\n            continue", "if False:\n            continue", "a test with nothing to perturb is run"),
+    # --- the type of each key of the configuration (batch 4a) ---
+    ("guardrail/core.py", "return isinstance(value, int) and not isinstance(value, bool)", "return isinstance(value, int)", "a boolean is a whole number"),
+    ("guardrail/core.py", "return isinstance(value, int) and not isinstance(value, bool)", "return isinstance(value, (int, float)) and not isinstance(value, bool)", "a fraction is a whole number"),
+    ("guardrail/core.py", "return isinstance(value, list) and all(isinstance(item, str) for item in value)", "return isinstance(value, list)", "a list of anything is a list of strings"),
+    ("guardrail/core.py", "            _check_shape(key, value)\n", "", "the shape of a key is not checked"),
+    ("guardrail/core.py", "{CONFIG_FILE}: {path} must be {expected}", "{CONFIG_FILE}: must be {expected}", "a refusal does not name the key"),
 ]
 
 
