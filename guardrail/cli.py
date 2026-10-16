@@ -53,6 +53,16 @@ def _perf_gate(args: list[str]) -> int:
     return 1 if warnings and options.strict else 0
 
 
+def _read(path: str) -> str:
+    """The text of an input file. One that cannot be read (missing, a folder, no permission) is a lock
+    that cannot look, so it does not pass: a reported error, never a traceback."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError as error:
+        raise core.GuardrailError(f"{path} cannot be read: {error}") from error
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
@@ -66,8 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         config = core.Config.load(root)
 
         if command == "selfcheck":
-            with open(os.path.join(root, ".pre-commit-config.yaml"), encoding="utf-8") as handle:
-                return _report(command, locks.selfcheck(root, handle.read()))
+            return _report(command, locks.selfcheck(root, _read(os.path.join(root, ".pre-commit-config.yaml"))))
 
         if command == "citations":  # manual: every tracked document, not only the staged lines
             problems, unresolved = locks.live_citations(root, config, every_file=True)
@@ -91,8 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             if len(rest) != 1:
                 print(USAGE, file=sys.stderr)
                 return 2
-            with open(rest[0], encoding="utf-8") as handle:
-                message = handle.read()
+            message = _read(rest[0])
             problems, notes = locks.commit_gate(root, config, message)
             return _report(command, problems, notes)
     except core.GuardrailError as error:

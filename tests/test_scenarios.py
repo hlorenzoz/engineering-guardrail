@@ -1769,5 +1769,38 @@ class ConfigTypes(Scenario):
         self.expect(repo.gate("fix: a\n"), 1, "production file(s) staged and no test")
 
 
+class MissingInputFile(Scenario):
+    """A command that is handed a file it cannot read cannot look, so it does not pass: exit 2 with the
+    message of every such failure, naming the file, and no traceback. It blocks as it did before; only
+    the code (1, from an uncaught error) and the message change."""
+
+    def refused(self, outcome, name):
+        code, out = outcome
+        self.assertEqual(code, 2, out)
+        self.assertIn("cannot look, so it does not pass", out)
+        self.assertIn(name, out)
+        self.assertNotIn("Traceback", out)
+
+    def test_selfcheck_without_the_pre_commit_configuration_cannot_look(self):
+        repo = Repo(self)  # no .pre-commit-config.yaml
+        self.refused(repo.run("selfcheck"), ".pre-commit-config.yaml")
+
+    def test_selfcheck_with_a_folder_where_the_pre_commit_configuration_should_be_cannot_look(self):
+        repo = Repo(self)
+        os.makedirs(os.path.join(repo.root, ".pre-commit-config.yaml"))
+        self.refused(repo.run("selfcheck"), ".pre-commit-config.yaml")
+
+    def test_commit_gate_without_the_message_file_cannot_look(self):
+        repo = Repo(self)
+        missing = os.path.join(repo.root, ".git", "NO_SUCH_MESSAGE")
+        self.refused(repo.run("commit-gate", missing), "NO_SUCH_MESSAGE")
+
+    def test_commit_gate_with_a_folder_for_the_message_file_cannot_look(self):
+        repo = Repo(self)
+        folder = os.path.join(repo.root, ".git", "A_FOLDER_NOT_A_MESSAGE")
+        os.makedirs(folder)
+        self.refused(repo.run("commit-gate", folder), "A_FOLDER_NOT_A_MESSAGE")
+
+
 if __name__ == "__main__":
     unittest.main()

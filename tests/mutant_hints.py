@@ -247,4 +247,6 @@ HINTS = {
     "a list of anything is a list of strings": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
     "the shape of a key is not checked": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
     "a refusal does not name the key": "tests.test_units.ConfigShape.test_each_wrong_type_is_refused_naming_the_key_and_the_type_it_expects",
+    "a folder where an input file should be is a traceback": "tests.test_scenarios.MissingInputFile.test_selfcheck_with_a_folder_where_the_pre_commit_configuration_should_be_cannot_look",
+    "a file that cannot be read is a traceback": "tests.test_scenarios.MissingInputFile.test_commit_gate_without_the_message_file_cannot_look",
 }

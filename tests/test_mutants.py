@@ -291,6 +291,9 @@ MUTANTS = [
     ("guardrail/core.py", "return isinstance(value, list) and all(isinstance(item, str) for item in value)", "return isinstance(value, list)", "a list of anything is a list of strings"),
     ("guardrail/core.py", "            _check_shape(key, value)\n", "", "the shape of a key is not checked"),
     ("guardrail/core.py", "{CONFIG_FILE}: {path} must be {expected}", "{CONFIG_FILE}: must be {expected}", "a refusal does not name the key"),
+    # --- an input file that cannot be read (batch 4b) ---
+    ("guardrail/cli.py", "    except OSError as error:\n", "    except FileNotFoundError as error:\n", "a folder where an input file should be is a traceback"),
+    ("guardrail/cli.py", "raise core.GuardrailError(f\"{path} cannot be read: {error}\") from error", "raise", "a file that cannot be read is a traceback"),
 ]
 
 
