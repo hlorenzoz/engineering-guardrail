@@ -5,8 +5,15 @@ Each mutant replaces one literal that must occur EXACTLY once in its file; a
 mutant that cannot be applied is a failure, because it proves nothing.
 
 The run works on a snapshot of the repository taken when it starts, so the code can be
-edited while it goes. A mutant stops at the first test that fails (that is a kill): the direct
-tests of tests/test_units.py and tests/test_schema.py first, which take milliseconds, then the scenarios.
+edited while it goes. It starts with a CONTROL: the unmutated suite on the snapshot. If that is
+red, every mutant would look killed, so the run stops there and says so.
+
+A mutant is killed by the first test that fails. To find it fast, the test that killed it in a
+recorded run is tried alone first (tests/mutant_hints.py, label -> test id); only when that one
+does not fail is the whole suite run, the direct tests of tests/test_units.py and
+tests/test_schema.py first and then the scenarios. A hint changes the time, never the verdict:
+a mutant is reported as survived only after the whole suite stayed green on it. A mutant without
+a hint (a new one) runs the whole suite and its line says which test killed it, to be added.
 GUARDRAIL_MUTANTS=<text> runs only the mutants whose label or file contains the text
 (comma-separated for several); it is for the work in progress, never for a release.
 GUARDRAIL_MUTANT_WORKERS (default 3) is how many mutants run at once.
@@ -20,6 +27,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from tests.mutant_hints import HINTS
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -285,21 +294,91 @@ def selected(mutants):
     return [m for m in mutants if not wanted or any(text in m[3] or text in m[0] for text in wanted)]
 
 
+SUITE = ["tests.test_units", "tests.test_schema", "tests.test_scenarios"]
+
+
 def killer(result):
-    """` <- <first failing scenario>` from the output of a failed run (the first FAIL or ERROR header)."""
+    """` <- <id of the first failing test>` from the output of a failed run (the first FAIL or ERROR header)."""
     first = re.search(r"^(?:FAIL|ERROR): (.+)$", result.stderr.decode("utf-8", "replace"), re.M)
-    return f" <- {first.group(1)}" if first else " <- (no failing scenario named in the output)"
+    if not first:
+        return " <- (no failing scenario named in the output)"
+    ident = re.search(r"\((\S+)\)", first.group(1))
+    return f" <- {ident.group(1) if ident else first.group(1)}"
+
+
+def run_tests(names, cwd, home):
+    """Run the named tests (the suite, or one hint) in `cwd`, stopping at the first failure, with the guardrail code taken from `home`."""
+    return subprocess.run(
+        [sys.executable, "-m", "unittest", "-q", "-f", *names],
+        cwd=cwd,
+        env={**os.environ, "GUARDRAIL_HOME": home},
+        capture_output=True,
+    )
+
+
+def unresolved_hints(hints, labels):
+    """The hints that point nowhere: a label that is not a mutant, or a test id that does not load."""
+    stale = [f"{label}: not a mutant" for label in hints if label not in labels]
+    for label, ident in hints.items():
+        loaded = list(_flatten(unittest.defaultTestLoader.loadTestsFromName(ident)))
+        if not loaded or any(type(test).__name__ == "_FailedTest" for test in loaded):
+            stale.append(f"{label}: {ident} is not a test")
+    return stale
+
+
+def _flatten(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from _flatten(item)
+        else:
+            yield item
+
+
+class TheHarnessReadsWhatItIsGiven(unittest.TestCase):
+    """The pure parts of the run, directly: they decide what a log says and which hints are trusted."""
+
+    def result(self, stderr):
+        return subprocess.CompletedProcess([], 1, b"", stderr.encode())
+
+    def test_the_killer_is_the_id_of_the_first_failing_test(self):
+        out = "....\nFAIL: test_a (tests.test_scenarios.Lock.test_a)\nFAIL: test_b (tests.test_scenarios.Other.test_b)\n"
+        self.assertEqual(killer(self.result(out)), " <- tests.test_scenarios.Lock.test_a")
+
+    def test_a_failure_that_names_a_class_gives_the_class(self):
+        out = "ERROR: setUpClass (tests.test_scenarios.Lock)\n"
+        self.assertEqual(killer(self.result(out)), " <- tests.test_scenarios.Lock")
+
+    def test_a_run_that_names_no_test_says_so_instead_of_inventing_one(self):
+        self.assertIn("no failing scenario", killer(self.result("Segmentation fault\n")))
+
+    def test_a_hint_that_loads_is_trusted_and_one_that_does_not_is_listed(self):
+        real = f"{__name__}.{TheHarnessReadsWhatItIsGiven.__name__}.test_a_run_that_names_no_test_says_so_instead_of_inventing_one"
+        stale = unresolved_hints({"one": real, "two": "tests.test_mutants.NoSuchClass.test_x", "three": real}, {"one", "two"})
+        self.assertEqual(len(stale), 2)
+        self.assertTrue(any(line.startswith("two:") for line in stale))
+        self.assertTrue(any(line.startswith("three:") and "not a mutant" in line for line in stale))
 
 
 class LocksAreGuarded(unittest.TestCase):
+    def test_every_hint_names_a_test_that_exists_and_a_mutant(self):
+        # A stale hint would not change a verdict, but it would silently put the whole suite back in front of the mutant.
+        self.assertEqual(unresolved_hints(HINTS, {m[3] for m in MUTANTS}), [])
+
     def test_every_mutant_is_killed_by_the_scenarios(self):
         survivors, not_applied = [], []
         with tempfile.TemporaryDirectory() as snapshot:
             for name in ("guardrail", "bin", "tests"):
                 shutil.copytree(os.path.join(HERE, name), os.path.join(snapshot, name), ignore=shutil.ignore_patterns("__pycache__", "tests_*.txt"))
+            self.assert_the_unmutated_suite_is_green(snapshot)
             self.run_mutants(snapshot, survivors, not_applied)
         self.assertEqual(not_applied, [], "mutants that could not be applied prove nothing")
         self.assertEqual(survivors, [], "the scenarios stayed green with these locks broken")
+
+    def assert_the_unmutated_suite_is_green(self, snapshot):
+        """The control: on a red suite every mutant "dies", so nothing below would mean anything."""
+        control = run_tests(SUITE, snapshot, snapshot)
+        print(f"control  the unmutated suite: {'green' if control.returncode == 0 else 'RED'}", file=sys.stderr, flush=True)
+        self.assertEqual(control.returncode, 0, "the suite is red WITHOUT any mutant, so no mutant can be judged:\n" + control.stderr.decode("utf-8", "replace")[-3000:])
 
     def run_mutants(self, snapshot, survivors, not_applied):
         # Mutants are independent (each has its own copy of the code and the scenarios build their own
@@ -333,16 +412,23 @@ class LocksAreGuarded(unittest.TestCase):
                 return f"{label} (does not compile: {error.msg})", "not applied"
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(mutated)
-            result = subprocess.run(
-                [sys.executable, "-m", "unittest", "-q", "-f", "tests.test_units", "tests.test_schema", "tests.test_scenarios"],
-                cwd=snapshot,
-                env={**os.environ, "GUARDRAIL_HOME": tmp},
-                capture_output=True,
-            )
+            hint = HINTS.get(label)
+            result, how = None, "no hint"
+            if hint:
+                # The test that killed this mutant before, alone. Its failure is a kill (the suite would fail too).
+                result = run_tests([hint], snapshot, tmp)
+                how = "hint"
+                if result.returncode == 0 or b"_FailedTest" in result.stderr:
+                    result, how = None, "hint missed"
+            if result is None:
+                # Only a green run of the WHOLE suite lets a mutant survive.
+                result = run_tests(SUITE, snapshot, tmp)
             killed = result.returncode != 0
-            # One line per mutant, so the log of a run says which lock each one broke and WHICH scenario
+            # One line per mutant, so the log of a run says which lock each one broke and WHICH test
             # saw it: a mutant killed by an incidental crash looks different from one killed by its lock's scenario.
-            print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}{killer(result) if killed else ''}", file=sys.stderr, flush=True)
+            # A line that says "no hint" or "hint missed" gives the id to write in tests/mutant_hints.py.
+            suffix = "" if how == "hint" else f" [{how}]"
+            print(f"{'killed  ' if killed else 'SURVIVED'} {file}: {label}{killer(result) if killed else ''}{suffix}", file=sys.stderr, flush=True)
             return label, "killed" if killed else "survived"
 
 
