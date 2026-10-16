@@ -374,7 +374,7 @@ not tune how much slower is too slow.
 | Command | What it does |
 | :--- | :--- |
 | `just test` | The direct tests of the pure readers (`tests/test_units.py`: fake-test patterns, replaceable expected values, globs, the report reader, the 3.9 and standard-library rules), the reader of migration SQL (`tests/test_schema.py`), then the canary scenarios: every lock on a throwaway repository, through the real command line |
-| `just mutants` | Breaks each lock on purpose and requires the scenarios to turn red. Measured: 29 minutes for 156 mutants, 3 workers, no other test run on the machine (2026-10-15, `8253b9c`); it prints one line per mutant with the scenario that killed it |
+| `just mutants` | Breaks each lock on purpose and requires the scenarios to turn red. It first runs the unmutated suite as a control (a red suite stops the run: every mutant would look killed), then tries on each mutant the test that killed it last time (`tests/mutant_hints.py`) and runs the whole suite only when that one stays green, so a survivor is still judged by everything. Measured on 2026-10-16, 3 workers, no other test run on the machine: 234 mutants in 80.6 s (`3667b94`, control included), against 1,834.5 s (30.6 min) for the same 234 in the old order at `9737e65` (alphabetical, a mutant killed late ran most of the suite first); the same 234 killed, none survived. A new mutant has no hint and runs the whole suite; its line says `[no hint]` and which test killed it, to add to `tests/mutant_hints.py` |
 | `just check` | Both |
 
 A change to a lock ships with its scenario (must bite, must stay quiet) and its mutant. A rule that

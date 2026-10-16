@@ -7,7 +7,7 @@ default:
 test:
     sh tests/log.sh unittest python3 -m unittest -v tests.test_units tests.test_schema tests.test_scenarios
 
-# Break each lock on purpose; the scenarios must turn red (29 minutes measured on 2026-10-15 at 8253b9c: 156 mutants, 3 workers)
+# Break each lock on purpose; the scenarios must turn red (80 s measured on 2026-10-16 at 3667b94: 234 mutants, 3 workers, control run included; 30.6 min before the killer-first order)
 mutants:
     sh tests/log.sh mutants python3 -m unittest -v tests.test_mutants
 

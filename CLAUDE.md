@@ -44,7 +44,7 @@ Operating guide for AI agents working in this repository: the shared git hooks
 | `guardrail/cli.py` | Commands, messages and exit codes |
 | `bin/guardrail` | The entry point the hooks call |
 | `.pre-commit-hooks.yaml` | The hooks offered to projects |
-| `tests/` | `test_units.py` (direct tests of the pure readers and of the 3.9 and standard-library rules), `test_schema.py` (direct tests of the SQL reader, `guardrail/schema.py`), `test_scenarios.py` (through the command line) and `test_mutants.py` (`GUARDRAIL_MUTANTS=<text>` narrows a run while working); `log.sh` and the complete output of the last run of each (`tests_<name>.txt`, not versioned) |
+| `tests/` | `test_units.py` (direct tests of the pure readers and of the 3.9 and standard-library rules), `test_schema.py` (direct tests of the SQL reader, `guardrail/schema.py`), `test_scenarios.py` (through the command line) and `test_mutants.py` (`GUARDRAIL_MUTANTS=<text>` narrows a run while working; it checks the unmutated suite first, then tries on each mutant the test listed for it in `mutant_hints.py`; a new mutant without a hint is still judged by the whole suite); `log.sh` and the complete output of the last run of each (`tests_<name>.txt`, not versioned) |
 
 ## Releasing
 
